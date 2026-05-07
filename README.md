@@ -115,7 +115,7 @@ For accounts using long/short position mode:
 conda run -n 10U ten-u okx-demo --top 20 --pos-mode long-short --execute
 ```
 
-Keep scanning the OKX demo market until a signal appears. In dry-run mode it keeps printing plans; in `--execute` mode it stops after one demo order is sent to avoid duplicate entries:
+Keep scanning the OKX demo market until you stop it with `Ctrl-C`. In dry-run mode it keeps printing plans; in `--execute` mode it keeps scanning after an order is sent and skips the same `symbol + side` until that signal expires:
 
 ```bash
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --pos-mode long-short --loop --poll-seconds 60

@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     okx_demo.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
     okx_demo.add_argument("--pos-mode", choices=["net", "long-short"], default="net")
     okx_demo.add_argument("--execute", action="store_true", help="actually place the order in OKX demo trading")
-    okx_demo.add_argument("--loop", action="store_true", help="keep scanning until interrupted or one demo order is sent")
+    okx_demo.add_argument("--loop", action="store_true", help="keep scanning until interrupted")
     okx_demo.add_argument("--poll-seconds", type=int, default=60, help="seconds between loop scans")
     return parser
 
@@ -238,7 +238,7 @@ def cmd_okx_demo(args: argparse.Namespace) -> int:
         _print_json(
             {
                 "mode": "WATCH_OKX_DEMO",
-                "message": "Scanning OKX demo trading until interrupted. Execute mode stops after one order is sent.",
+                "message": "Scanning OKX demo trading until interrupted. Executed symbol/side signals are skipped until expiry.",
                 "execute": args.execute,
                 "simulated": True,
                 "pos_mode": args.pos_mode,
@@ -281,11 +281,18 @@ def _okx_demo_loop(
     cfg: StrategyConfig,
     args: argparse.Namespace,
 ) -> None:
+    executed_signals: dict[str, datetime] = {}
     while True:
         try:
-            placed_order = _okx_demo_once(public_client, inst_ids, cfg, args, loop_mode=True)
-            if placed_order:
-                return
+            _prune_executed_signals(executed_signals)
+            _okx_demo_once(
+                public_client,
+                inst_ids,
+                cfg,
+                args,
+                loop_mode=True,
+                executed_signals=executed_signals,
+            )
         except KeyboardInterrupt:
             _print_json({"mode": "STOPPED", "message": "OKX demo scanner stopped by user.", **_scan_time()})
             return
@@ -304,11 +311,25 @@ def _okx_demo_once(
     cfg: StrategyConfig,
     args: argparse.Namespace,
     loop_mode: bool = False,
+    executed_signals: dict[str, datetime] | None = None,
 ) -> int | bool:
     signal = best_okx_signal(public_client, inst_ids, cfg, args.lookback)
     if signal is None:
         _print_json(_okx_signal_payload(None, inst_ids))
         return False if loop_mode else 0
+    signal_key = _signal_trade_key(signal)
+    if args.execute and loop_mode and executed_signals is not None and signal_key in executed_signals:
+        _print_json(
+            {
+                "mode": "DUPLICATE_SIGNAL_SKIPPED",
+                "message": "This symbol/side already has an executed signal in the current expiry window.",
+                "signal_key": signal_key,
+                "active_until": executed_signals[signal_key].isoformat(),
+                "signal": signal.as_dict(),
+                **_scan_time(),
+            }
+        )
+        return False
     instruments = public_client.instruments()
     instrument = instruments.get(signal.symbol)
     if instrument is None:
@@ -336,13 +357,17 @@ def _okx_demo_once(
     _print_json(
         {
             "mode": "EXECUTED_OKX_DEMO",
-            "message": "One OKX demo order was sent; loop mode stops here to avoid duplicate entries.",
+            "message": "One OKX demo order was sent. Loop mode will keep scanning and skip this symbol/side until expiry.",
+            "signal_key": signal_key,
+            "active_until": _signal_expires_at(signal).isoformat(),
             "order_plan": order_plan.as_dict(),
             "okx_response": response,
             **_scan_time(),
         }
     )
-    return True if loop_mode else 0
+    if loop_mode and executed_signals is not None:
+        executed_signals[signal_key] = _signal_expires_at(signal)
+    return False if loop_mode else 0
 
 
 def _okx_signal_payload(signal: Signal | None, inst_ids: list[str]) -> dict[str, Any]:
@@ -353,6 +378,25 @@ def _okx_signal_payload(signal: Signal | None, inst_ids: list[str]) -> dict[str,
 
 def _poll_seconds(value: int) -> int:
     return max(1, int(value))
+
+
+def _signal_trade_key(signal: Signal) -> str:
+    return f"{signal.symbol}:{signal.side}"
+
+
+def _signal_expires_at(signal: Signal) -> datetime:
+    expires_at = signal.expires_at.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(expires_at)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _prune_executed_signals(executed_signals: dict[str, datetime]) -> None:
+    now = datetime.now(UTC)
+    expired = [key for key, expires_at in executed_signals.items() if expires_at <= now]
+    for key in expired:
+        del executed_signals[key]
 
 
 def _scan_time() -> dict[str, str]:
