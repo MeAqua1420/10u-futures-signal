@@ -91,6 +91,12 @@ Generate the current best OKX signal without trading:
 conda run -n 10U ten-u okx-signal --top 20 --strategy manuscript
 ```
 
+Keep scanning for OKX signals until you stop it with `Ctrl-C`:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-signal --top 20 --strategy manuscript --loop --poll-seconds 60
+```
+
 Prepare an OKX demo order plan without sending it:
 
 ```bash
@@ -107,6 +113,13 @@ For accounts using long/short position mode:
 
 ```bash
 conda run -n 10U ten-u okx-demo --top 20 --pos-mode long-short --execute
+```
+
+Keep scanning the OKX demo market until a signal appears. In dry-run mode it keeps printing plans; in `--execute` mode it stops after one demo order is sent to avoid duplicate entries:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --pos-mode long-short --loop --poll-seconds 60
+conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --pos-mode long-short --loop --poll-seconds 60 --execute
 ```
 
 The OKX order plan uses isolated margin, market entry, `10USDT` margin sizing, the strategy-selected leverage, and attached market TP/SL orders. The strategy still prints `expires_at`; automatic 4-hour time-exit management should be run by a separate monitor before relying on unattended demo trading.

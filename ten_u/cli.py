@@ -19,6 +19,7 @@ from ten_u.backtest import (
 )
 from ten_u.binance import BinanceClient, load_or_fetch_klines
 from ten_u.config import BacktestConfig, CostConfig, StrategyConfig
+from ten_u.models import CN_TZ, Signal
 from ten_u.okx import OKXClient, OKXCredentials, best_okx_signal, build_order_plan
 from ten_u.realtime import rest_polling_scanner, websocket_scanner
 
@@ -79,6 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
     okx_signal.add_argument("--top", type=int, default=20)
     okx_signal.add_argument("--lookback", type=int, default=720)
     okx_signal.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
+    okx_signal.add_argument("--loop", action="store_true", help="keep scanning until interrupted")
+    okx_signal.add_argument("--poll-seconds", type=int, default=60, help="seconds between loop scans")
 
     okx_demo = sub.add_parser("okx-demo", help="prepare or execute an OKX demo trading order from the best signal")
     okx_demo.add_argument("--symbols", nargs="*", default=None, help="OKX instIds, e.g. BTC-USDT-SWAP ETH-USDT-SWAP")
@@ -87,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     okx_demo.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
     okx_demo.add_argument("--pos-mode", choices=["net", "long-short"], default="net")
     okx_demo.add_argument("--execute", action="store_true", help="actually place the order in OKX demo trading")
+    okx_demo.add_argument("--loop", action="store_true", help="keep scanning until interrupted or one demo order is sent")
+    okx_demo.add_argument("--poll-seconds", type=int, default=60, help="seconds between loop scans")
     return parser
 
 
@@ -208,11 +213,20 @@ def cmd_okx_signal(args: argparse.Namespace) -> int:
     client = OKXClient(simulated=True)
     cfg = StrategyConfig(signal_model=args.strategy)
     inst_ids = args.symbols or client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
-    signal = best_okx_signal(client, inst_ids, cfg, args.lookback)
-    if signal is None:
-        print(json.dumps({"message": "NO_SIGNAL", "symbols": inst_ids}, ensure_ascii=False, indent=2))
+    if args.loop:
+        _print_json(
+            {
+                "mode": "WATCH_OKX_SIGNAL",
+                "message": "Scanning OKX simulated market data until interrupted.",
+                "poll_seconds": _poll_seconds(args.poll_seconds),
+                "symbols": inst_ids,
+                **_scan_time(),
+            }
+        )
+        _okx_signal_loop(client, inst_ids, cfg, args.lookback, args.poll_seconds)
         return 0
-    print(json.dumps(signal.as_dict(), ensure_ascii=False, indent=2))
+    signal = best_okx_signal(client, inst_ids, cfg, args.lookback)
+    _print_json(_okx_signal_payload(signal, inst_ids))
     return 0
 
 
@@ -220,29 +234,97 @@ def cmd_okx_demo(args: argparse.Namespace) -> int:
     public_client = OKXClient(simulated=True)
     cfg = StrategyConfig(signal_model=args.strategy)
     inst_ids = args.symbols or public_client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
+    if args.loop:
+        _print_json(
+            {
+                "mode": "WATCH_OKX_DEMO",
+                "message": "Scanning OKX demo trading until interrupted. Execute mode stops after one order is sent.",
+                "execute": args.execute,
+                "simulated": True,
+                "pos_mode": args.pos_mode,
+                "poll_seconds": _poll_seconds(args.poll_seconds),
+                "symbols": inst_ids,
+                **_scan_time(),
+            }
+        )
+        _okx_demo_loop(public_client, inst_ids, cfg, args)
+        return 0
+    return _okx_demo_once(public_client, inst_ids, cfg, args)
+
+
+def _okx_signal_loop(
+    client: OKXClient,
+    inst_ids: list[str],
+    cfg: StrategyConfig,
+    lookback: int,
+    poll_seconds: int,
+) -> None:
+    while True:
+        try:
+            signal = best_okx_signal(client, inst_ids, cfg, lookback)
+            _print_json(_okx_signal_payload(signal, inst_ids))
+        except KeyboardInterrupt:
+            _print_json({"mode": "STOPPED", "message": "OKX signal scanner stopped by user.", **_scan_time()})
+            return
+        except Exception as exc:  # pragma: no cover - depends on network/API conditions
+            _print_json({"mode": "SCAN_ERROR", "error": str(exc), **_scan_time()})
+        try:
+            time.sleep(_poll_seconds(poll_seconds))
+        except KeyboardInterrupt:
+            _print_json({"mode": "STOPPED", "message": "OKX signal scanner stopped by user.", **_scan_time()})
+            return
+
+
+def _okx_demo_loop(
+    public_client: OKXClient,
+    inst_ids: list[str],
+    cfg: StrategyConfig,
+    args: argparse.Namespace,
+) -> None:
+    while True:
+        try:
+            placed_order = _okx_demo_once(public_client, inst_ids, cfg, args, loop_mode=True)
+            if placed_order:
+                return
+        except KeyboardInterrupt:
+            _print_json({"mode": "STOPPED", "message": "OKX demo scanner stopped by user.", **_scan_time()})
+            return
+        except Exception as exc:  # pragma: no cover - depends on network/API conditions
+            _print_json({"mode": "SCAN_ERROR", "error": str(exc), **_scan_time()})
+        try:
+            time.sleep(_poll_seconds(args.poll_seconds))
+        except KeyboardInterrupt:
+            _print_json({"mode": "STOPPED", "message": "OKX demo scanner stopped by user.", **_scan_time()})
+            return
+
+
+def _okx_demo_once(
+    public_client: OKXClient,
+    inst_ids: list[str],
+    cfg: StrategyConfig,
+    args: argparse.Namespace,
+    loop_mode: bool = False,
+) -> int | bool:
     signal = best_okx_signal(public_client, inst_ids, cfg, args.lookback)
     if signal is None:
-        print(json.dumps({"message": "NO_SIGNAL", "symbols": inst_ids}, ensure_ascii=False, indent=2))
-        return 0
+        _print_json(_okx_signal_payload(None, inst_ids))
+        return False if loop_mode else 0
     instruments = public_client.instruments()
     instrument = instruments.get(signal.symbol)
     if instrument is None:
         print(f"OKX instrument not found or not live: {signal.symbol}", file=sys.stderr)
-        return 2
+        return False if loop_mode else 2
     order_plan = build_order_plan(signal, instrument, args.pos_mode)
     if not args.execute:
-        print(
-            json.dumps(
-                {
-                    "mode": "DRY_RUN",
-                    "message": "No order was sent. Add --execute to place this in OKX demo trading.",
-                    "order_plan": order_plan.as_dict(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+        _print_json(
+            {
+                "mode": "DRY_RUN",
+                "message": "No order was sent. Add --execute to place this in OKX demo trading.",
+                "order_plan": order_plan.as_dict(),
+                **_scan_time(),
+            }
         )
-        return 0
+        return False if loop_mode else 0
 
     private_client = OKXClient(credentials=OKXCredentials.from_env(), simulated=True)
     private_client.set_leverage(
@@ -251,18 +333,38 @@ def cmd_okx_demo(args: argparse.Namespace) -> int:
         order_plan.pos_side,
     )
     response = private_client.place_order(order_plan)
-    print(
-        json.dumps(
-            {
-                "mode": "EXECUTED_OKX_DEMO",
-                "order_plan": order_plan.as_dict(),
-                "okx_response": response,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    _print_json(
+        {
+            "mode": "EXECUTED_OKX_DEMO",
+            "message": "One OKX demo order was sent; loop mode stops here to avoid duplicate entries.",
+            "order_plan": order_plan.as_dict(),
+            "okx_response": response,
+            **_scan_time(),
+        }
     )
-    return 0
+    return True if loop_mode else 0
+
+
+def _okx_signal_payload(signal: Signal | None, inst_ids: list[str]) -> dict[str, Any]:
+    if signal is None:
+        return {"message": "NO_SIGNAL", "symbols": inst_ids, **_scan_time()}
+    return {"message": "SIGNAL", "signal": signal.as_dict(), **_scan_time()}
+
+
+def _poll_seconds(value: int) -> int:
+    return max(1, int(value))
+
+
+def _scan_time() -> dict[str, str]:
+    now = datetime.now(UTC)
+    return {
+        "scan_time_utc": now.isoformat(),
+        "scan_time_cn": now.astimezone(CN_TZ).isoformat(),
+    }
+
+
+def _print_json(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
 
 
 def _metrics_dict(metrics: Any) -> dict[str, Any]:
