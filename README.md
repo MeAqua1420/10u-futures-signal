@@ -67,6 +67,50 @@ WebSocket support is included in the conda environment through `websocket-client
 conda run -n 10U python -m ten_u.cli realtime --top 60 --mode ws --strategy manuscript
 ```
 
+## OKX Demo Trading
+
+OKX demo trading uses the same strategy engine, but reads OKX `SWAP` candles and submits orders to OKX V5 with the simulated-trading header. The execution command is safe by default: it prints a dry-run order plan unless `--execute` is provided.
+
+Create an OKX demo API key in OKX and export credentials:
+
+```bash
+export OKX_API_KEY=...
+export OKX_API_SECRET=...
+export OKX_API_PASSPHRASE=...
+```
+
+Inspect OKX USDT swap symbols:
+
+```bash
+conda run -n 10U ten-u okx-symbols --top 20
+```
+
+Generate the current best OKX signal without trading:
+
+```bash
+conda run -n 10U ten-u okx-signal --top 20 --strategy manuscript
+```
+
+Prepare an OKX demo order plan without sending it:
+
+```bash
+conda run -n 10U ten-u okx-demo --top 20 --strategy manuscript
+```
+
+Actually place the selected signal in OKX demo trading:
+
+```bash
+conda run -n 10U ten-u okx-demo --top 20 --strategy manuscript --execute
+```
+
+For accounts using long/short position mode:
+
+```bash
+conda run -n 10U ten-u okx-demo --top 20 --pos-mode long-short --execute
+```
+
+The OKX order plan uses isolated margin, market entry, `10USDT` margin sizing, the strategy-selected leverage, and attached market TP/SL orders. The strategy still prints `expires_at`; automatic 4-hour time-exit management should be run by a separate monitor before relying on unattended demo trading.
+
 ## Manuscript Strategy
 
 The default `manuscript` signal model follows the uploaded strategy notes:

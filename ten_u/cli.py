@@ -19,6 +19,7 @@ from ten_u.backtest import (
 )
 from ten_u.binance import BinanceClient, load_or_fetch_klines
 from ten_u.config import BacktestConfig, CostConfig, StrategyConfig
+from ten_u.okx import OKXClient, OKXCredentials, best_okx_signal, build_order_plan
 from ten_u.realtime import rest_polling_scanner, websocket_scanner
 
 
@@ -31,6 +32,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_backtest(args)
     if args.command == "realtime":
         return cmd_realtime(args)
+    if args.command == "okx-symbols":
+        return cmd_okx_symbols(args)
+    if args.command == "okx-signal":
+        return cmd_okx_signal(args)
+    if args.command == "okx-demo":
+        return cmd_okx_demo(args)
     parser.print_help()
     return 1
 
@@ -61,6 +68,25 @@ def build_parser() -> argparse.ArgumentParser:
     realtime.add_argument("--poll-seconds", type=int, default=15)
     realtime.add_argument("--mode", choices=["rest", "ws"], default="rest")
     realtime.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
+
+    okx_symbols = sub.add_parser("okx-symbols", help="print liquidity-ranked OKX USDT swap instruments")
+    okx_symbols.add_argument("--top", type=int, default=20)
+    okx_symbols.add_argument("--min-quote-volume", type=float, default=50_000_000)
+    okx_symbols.add_argument("--json", action="store_true")
+
+    okx_signal = sub.add_parser("okx-signal", help="print the best current OKX signal without placing orders")
+    okx_signal.add_argument("--symbols", nargs="*", default=None, help="OKX instIds, e.g. BTC-USDT-SWAP ETH-USDT-SWAP")
+    okx_signal.add_argument("--top", type=int, default=20)
+    okx_signal.add_argument("--lookback", type=int, default=720)
+    okx_signal.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
+
+    okx_demo = sub.add_parser("okx-demo", help="prepare or execute an OKX demo trading order from the best signal")
+    okx_demo.add_argument("--symbols", nargs="*", default=None, help="OKX instIds, e.g. BTC-USDT-SWAP ETH-USDT-SWAP")
+    okx_demo.add_argument("--top", type=int, default=20)
+    okx_demo.add_argument("--lookback", type=int, default=720)
+    okx_demo.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
+    okx_demo.add_argument("--pos-mode", choices=["net", "long-short"], default="net")
+    okx_demo.add_argument("--execute", action="store_true", help="actually place the order in OKX demo trading")
     return parser
 
 
@@ -164,6 +190,78 @@ def cmd_realtime(args: argparse.Namespace) -> int:
         asyncio.run(websocket_scanner(symbols, strategy_cfg, client, args.lookback))
     else:
         rest_polling_scanner(client, symbols, strategy_cfg, args.lookback, args.poll_seconds)
+    return 0
+
+
+def cmd_okx_symbols(args: argparse.Namespace) -> int:
+    client = OKXClient(simulated=True)
+    inst_ids = client.top_usdt_swap_instruments(args.top, args.min_quote_volume)
+    if args.json:
+        print(json.dumps(inst_ids, ensure_ascii=False, indent=2))
+    else:
+        for i, inst_id in enumerate(inst_ids, 1):
+            print(f"{i:02d}. {inst_id}")
+    return 0
+
+
+def cmd_okx_signal(args: argparse.Namespace) -> int:
+    client = OKXClient(simulated=True)
+    cfg = StrategyConfig(signal_model=args.strategy)
+    inst_ids = args.symbols or client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
+    signal = best_okx_signal(client, inst_ids, cfg, args.lookback)
+    if signal is None:
+        print(json.dumps({"message": "NO_SIGNAL", "symbols": inst_ids}, ensure_ascii=False, indent=2))
+        return 0
+    print(json.dumps(signal.as_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_okx_demo(args: argparse.Namespace) -> int:
+    public_client = OKXClient(simulated=True)
+    cfg = StrategyConfig(signal_model=args.strategy)
+    inst_ids = args.symbols or public_client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
+    signal = best_okx_signal(public_client, inst_ids, cfg, args.lookback)
+    if signal is None:
+        print(json.dumps({"message": "NO_SIGNAL", "symbols": inst_ids}, ensure_ascii=False, indent=2))
+        return 0
+    instruments = public_client.instruments()
+    instrument = instruments.get(signal.symbol)
+    if instrument is None:
+        print(f"OKX instrument not found or not live: {signal.symbol}", file=sys.stderr)
+        return 2
+    order_plan = build_order_plan(signal, instrument, args.pos_mode)
+    if not args.execute:
+        print(
+            json.dumps(
+                {
+                    "mode": "DRY_RUN",
+                    "message": "No order was sent. Add --execute to place this in OKX demo trading.",
+                    "order_plan": order_plan.as_dict(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
+    private_client = OKXClient(credentials=OKXCredentials.from_env(), simulated=True)
+    private_client.set_leverage(
+        order_plan.inst_id,
+        order_plan.leverage,
+        order_plan.pos_side,
+    )
+    response = private_client.place_order(order_plan)
+    print(
+        json.dumps(
+            {
+                "mode": "EXECUTED_OKX_DEMO",
+                "order_plan": order_plan.as_dict(),
+                "okx_response": response,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
