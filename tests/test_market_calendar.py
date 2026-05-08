@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from ten_u.market_calendar import is_us_market_non_workday, us_eastern_date
+from ten_u.market_calendar import recent_us_market_non_workdays, is_us_market_non_workday, us_eastern_date
 
 
 NY = ZoneInfo("America/New_York")
@@ -26,6 +26,10 @@ class MarketCalendarTests(unittest.TestCase):
 
     def test_nyse_early_close_is_still_workday(self) -> None:
         self.assertFalse(is_us_market_non_workday(ms(datetime(2026, 11, 27, 12, tzinfo=NY))))
+
+    def test_recent_us_market_non_workdays_returns_requested_count(self) -> None:
+        days = recent_us_market_non_workdays(3, ms(datetime(2026, 5, 8, 12, tzinfo=NY)))
+        self.assertEqual([day.isoformat() for day in days], ["2026-04-26", "2026-05-02", "2026-05-03"])
 
 
 if __name__ == "__main__":

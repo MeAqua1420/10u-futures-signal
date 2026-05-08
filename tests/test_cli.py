@@ -149,6 +149,8 @@ class CLITests(unittest.TestCase):
                 "3",
                 "--weekends",
                 "8",
+                "--non-workdays",
+                "6",
                 "--grid",
                 "full",
                 "--min-oos-trades",
@@ -158,6 +160,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual(args.command, "okx-weekend-backtest")
         self.assertEqual(args.top, 3)
         self.assertEqual(args.weekends, 8)
+        self.assertEqual(args.non_workdays, 6)
         self.assertEqual(args.grid, "full")
         self.assertEqual(args.min_oos_trades, 25)
 

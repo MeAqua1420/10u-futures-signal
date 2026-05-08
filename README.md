@@ -173,6 +173,12 @@ Search OKX `1s` history for US/Eastern non-workday factor combinations:
 conda run -n 10U ten-u okx-weekend-backtest --top 20 --weekends 8 --grid full --min-oos-trades 100
 ```
 
+For a faster exploratory run, fetch only the most recent N US/Eastern non-workdays:
+
+```bash
+conda run -n 10U ten-u okx-weekend-backtest --symbols ETH-USDT-SWAP --non-workdays 3 --grid quick --min-oos-trades 1
+```
+
 `scalp-1s` defaults to `--trade-cooldown-seconds 300` after every accepted order. You can override this, but setting it to `0` is only recommended for latency tests, not strategy evaluation:
 
 ```bash

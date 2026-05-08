@@ -83,15 +83,22 @@ def parameter_grid(mode: str = "quick", signal_model: str = "breakout") -> Itera
     """
     if signal_model == "microburst":
         if mode == "quick":
-            yield {
-                "donchian_window": 20,
-                "volume_multiple": 2.0,
-                "atr_min_percentile": 35,
-                "atr_max_percentile": 95,
-                "score_threshold": 80,
-                "max_leverage": 50,
-                "max_hold_seconds": 180,
-            }
+            keys = [
+                "donchian_window",
+                "volume_multiple",
+                "score_threshold",
+                "max_leverage",
+                "max_hold_seconds",
+            ]
+            values = [
+                [10, 20, 30],
+                [1.5, 2.0],
+                [70, 80],
+                [40, 50],
+                [60, 180],
+            ]
+            for combo in product(*values):
+                yield dict(zip(keys, combo, strict=True))
             return
         if mode != "full":
             raise ValueError("grid mode must be 'quick' or 'full'")

@@ -303,7 +303,7 @@ class OKXClient:
         params: dict[str, Any] = {
             "instId": inst_id,
             "bar": bar,
-            "limit": str(min(limit, 100)),
+            "limit": str(min(limit, 300)),
         }
         if after is not None:
             params["after"] = str(after)
@@ -323,7 +323,7 @@ class OKXClient:
         out: list[Candle] = []
         cursor = end_time + _bar_to_ms(bar)
         while cursor > start_time:
-            batch = self.history_candles(inst_id, bar, after=cursor, limit=100)
+            batch = self.history_candles(inst_id, bar, after=cursor, limit=300)
             if not batch:
                 break
             out.extend(c for c in batch if start_time <= c.open_time <= end_time)

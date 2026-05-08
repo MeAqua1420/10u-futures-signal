@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import datetime, date, time, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
@@ -22,6 +22,27 @@ def is_us_market_non_workday_date(day: date) -> bool:
     if day.weekday() >= 5:
         return True
     return _nyse_is_closed(day.isoformat())
+
+
+def recent_us_market_non_workdays(count: int, end_timestamp_ms: int | None = None) -> list[date]:
+    if count <= 0:
+        raise ValueError("count must be positive")
+    if end_timestamp_ms is None:
+        current = datetime.now(US_EASTERN).date()
+    else:
+        current = us_eastern_date(end_timestamp_ms)
+    days: list[date] = []
+    while len(days) < count:
+        if is_us_market_non_workday_date(current):
+            days.append(current)
+        current -= timedelta(days=1)
+    return sorted(days)
+
+
+def us_eastern_day_bounds_ms(day: date) -> tuple[int, int]:
+    start = datetime.combine(day, time.min, tzinfo=US_EASTERN)
+    end = datetime.combine(day, time.max, tzinfo=US_EASTERN)
+    return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
 
 
 @lru_cache(maxsize=4096)

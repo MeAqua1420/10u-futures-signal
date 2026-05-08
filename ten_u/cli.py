@@ -19,7 +19,12 @@ from ten_u.backtest import (
 )
 from ten_u.binance import BinanceClient, load_or_fetch_klines
 from ten_u.config import BacktestConfig, CostConfig, StrategyConfig, parameter_grid
-from ten_u.market_calendar import is_us_market_non_workday, us_eastern_date
+from ten_u.market_calendar import (
+    is_us_market_non_workday,
+    recent_us_market_non_workdays,
+    us_eastern_date,
+    us_eastern_day_bounds_ms,
+)
 from ten_u.models import CN_TZ, Signal
 from ten_u.okx import OKXClient, OKXCredentials, best_okx_signal, build_order_plan, load_or_fetch_okx_candles
 from ten_u.realtime import rest_polling_scanner, websocket_scanner
@@ -126,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     okx_weekend.add_argument("--symbols", nargs="*", default=None)
     okx_weekend.add_argument("--top", type=int, default=20)
     okx_weekend.add_argument("--weekends", type=int, default=8)
+    okx_weekend.add_argument("--non-workdays", type=int, default=None, help="exact number of recent US/Eastern non-workdays to fetch")
     okx_weekend.add_argument("--grid", choices=["quick", "full"], default="quick")
     okx_weekend.add_argument("--min-oos-trades", type=int, default=100)
     okx_weekend.add_argument("--min-quote-volume", type=float, default=50_000_000)
@@ -291,7 +297,12 @@ def cmd_okx_weekend_backtest(args: argparse.Namespace) -> int:
     )
     inst_ids = args.symbols or client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
     end = int(time.time() * 1000)
-    start = int((datetime.now(UTC) - timedelta(days=max(21, args.weekends * 7 + 14))).timestamp() * 1000)
+    selected_dates = recent_us_market_non_workdays(args.non_workdays, end) if args.non_workdays else None
+    start = (
+        min(us_eastern_day_bounds_ms(day)[0] for day in selected_dates)
+        if selected_dates
+        else int((datetime.now(UTC) - timedelta(days=max(21, args.weekends * 7 + 14))).timestamp() * 1000)
+    )
     instruments = client.instruments()
     candle_map = {}
     print(f"Fetching OKX 1s US non-workday search data: {', '.join(inst_ids)}", file=sys.stderr)
@@ -300,7 +311,22 @@ def cmd_okx_weekend_backtest(args: argparse.Namespace) -> int:
         if inst_id not in instruments:
             print(f"Skipping {inst_id}: instrument not live", file=sys.stderr)
             continue
-        candles = load_or_fetch_okx_candles(client, inst_id, "1s", start, end, refresh=args.refresh)
+        if selected_dates:
+            candles = []
+            for day in selected_dates:
+                day_start, day_end = us_eastern_day_bounds_ms(day)
+                candles.extend(
+                    load_or_fetch_okx_candles(
+                        client,
+                        inst_id,
+                        "1s",
+                        day_start,
+                        min(day_end, end),
+                        refresh=args.refresh,
+                    )
+                )
+        else:
+            candles = load_or_fetch_okx_candles(client, inst_id, "1s", start, end, refresh=args.refresh)
         if len(candles) < min_required:
             print(f"Skipping {inst_id}: not enough 1s candles ({len(candles)})", file=sys.stderr)
             continue
@@ -309,7 +335,7 @@ def cmd_okx_weekend_backtest(args: argparse.Namespace) -> int:
         _print_json({"mode": "NO_US_NONWORKDAY_EDGE", "message": "No symbols with enough OKX 1s data."})
         return 2
 
-    all_dates = sorted(
+    all_dates = selected_dates or sorted(
         {
             us_eastern_date(candle.close_time)
             for candles in candle_map.values()

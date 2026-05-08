@@ -77,7 +77,7 @@ class OKXTests(unittest.TestCase):
         self.assertEqual(len(candles), 1)
         self.assertEqual(client.last_path, "/api/v5/market/history-candles")
         self.assertEqual(client.last_params["after"], "2000")
-        self.assertEqual(client.last_params["limit"], "100")
+        self.assertEqual(client.last_params["limit"], "300")
 
     def test_contract_size_for_linear_swap(self) -> None:
         inst = OKXInstrument.from_api(
