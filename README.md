@@ -77,9 +77,11 @@ The OKX scanner uses only confirmed/closed candles. The default is now `--risk-p
 - `conservative`: max leverage `10x`, `RangeY >= 50`, `PSY >= 0.40`, mean deviation `>= 0.0025`
 - `standard`: research defaults, max leverage `15x`
 - `aggressive`: max leverage `20x`, looser gates; use only for deliberate higher-frequency testing
-- `scalp-1s`: forces confirmed `1s` candles, targets `+2U/-1U`, max leverage `50x` but clamps to the OKX instrument leverage limit
+- `scalp-1s`: forces confirmed `1s` candles, targets `+2U/-1U`, max leverage `50x` but clamps to the OKX instrument leverage limit; v2 adds 5-minute direction confirmation and a default 5-minute post-order cooldown
 
 OKX currently accepts `--bar 1s` and `--bar 1m` here. `1s` can produce more opportunities, but it is much noisier and is not the original backtested timeframe.
+
+The OKX symbol pool filters to crypto USDT swaps only (`instCategory=1`) and excludes `TEST*` instruments, so demo-only stock/test swaps such as `AAPL-USDT-SWAP` do not enter `--top` scans.
 
 Create an OKX demo API key in OKX and export credentials:
 
@@ -154,6 +156,12 @@ For the dedicated `1s` scalping profile with `+2U/-1U`:
 
 ```bash
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --risk-profile scalp-1s --pos-mode long-short --loop --poll-seconds 0 --execute
+```
+
+`scalp-1s` defaults to `--trade-cooldown-seconds 300` after every accepted order. You can override this, but setting it to `0` is only recommended for latency tests, not strategy evaluation:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --risk-profile scalp-1s --pos-mode long-short --loop --poll-seconds 0 --trade-cooldown-seconds 0
 ```
 
 BTC and ETH open fewer trades under the top-20 scanner because they usually have lower relative ATR and cleaner order books than high-beta alts, while the strategy requires both directional Heikin-Ashi structure and a reachable target/stop geometry. The scanner also emits only the best signal at each scan. To test majors directly, restrict the symbol set:

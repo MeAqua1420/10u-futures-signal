@@ -43,6 +43,8 @@ class StrategyConfig:
     ha_deviation_window: int = 5
     ha_deviation_threshold: float = 0.0015
     ha_score_threshold: float = 100.0
+    direction_window: int = 0
+    min_direction_change_pct: float = 0.0
 
     def with_updates(self, **kwargs: float | int | str) -> "StrategyConfig":
         return replace(self, **kwargs)

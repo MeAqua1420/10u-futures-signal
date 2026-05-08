@@ -105,6 +105,12 @@ def build_parser() -> argparse.ArgumentParser:
     okx_demo.add_argument("--execute", action="store_true", help="actually place the order in OKX demo trading")
     okx_demo.add_argument("--loop", action="store_true", help="keep scanning until interrupted")
     okx_demo.add_argument("--poll-seconds", type=int, default=60, help="seconds between loop scans")
+    okx_demo.add_argument(
+        "--trade-cooldown-seconds",
+        type=int,
+        default=None,
+        help="minimum seconds between accepted orders; scalp-1s defaults to 300",
+    )
     return parser
 
 
@@ -308,11 +314,29 @@ def _okx_demo_loop(
     stats = OKXSessionStats()
     private_client = OKXClient(credentials=OKXCredentials.from_env(), simulated=True) if args.execute else None
     instruments = public_client.instruments()
+    cooldown_seconds = _effective_trade_cooldown_seconds(args.risk_profile, args.trade_cooldown_seconds)
+    cooldown_until: datetime | None = None
     while True:
         scan_started = time.monotonic()
         try:
+            if cooldown_until is not None and datetime.now(UTC) < cooldown_until:
+                _print_json(
+                    _with_scan_duration(
+                        {
+                            "mode": "TRADE_COOLDOWN_ACTIVE",
+                            "message": "Skipping signal scan while the post-order cooldown is active.",
+                            "cooldown_until": cooldown_until.isoformat(),
+                            **_scan_time(),
+                        },
+                        scan_started,
+                    )
+                )
+                if not _sleep_between_scans(max(1, min(5, int((cooldown_until - datetime.now(UTC)).total_seconds()))), "OKX demo scanner", stats, private_client):
+                    return
+                continue
             stats.record_scan()
             _prune_executed_signals(executed_signals)
+            accepted_before = _accepted_order_count(stats)
             _okx_demo_once(
                 public_client,
                 inst_ids,
@@ -325,6 +349,8 @@ def _okx_demo_loop(
                 scan_started=scan_started,
                 instruments=instruments,
             )
+            if _accepted_order_count(stats) > accepted_before and cooldown_seconds > 0:
+                cooldown_until = datetime.now(UTC) + timedelta(seconds=cooldown_seconds)
         except KeyboardInterrupt:
             _print_json({"mode": "STOPPED", "message": "OKX demo scanner stopped by user.", **_scan_time()})
             _print_json(stats.summary(private_client))
@@ -457,14 +483,16 @@ def _okx_strategy_config(signal_model: str, risk_profile: str, bar: str = "1m") 
                 max_hold_minutes=240,
                 max_leverage=50,
                 min_expected_move_mult=0.45,
-                min_stop_atr_mult=1.05,
+                min_stop_atr_mult=1.25,
                 atr_period=60,
-                ha_range_window=180,
-                ha_range_y_threshold=18,
-                ha_psy_threshold=0.54,
-                ha_deviation_window=30,
-                ha_deviation_threshold=0.00025,
-                ha_score_threshold=90,
+                ha_range_window=300,
+                ha_range_y_threshold=30,
+                ha_psy_threshold=0.58,
+                ha_deviation_window=60,
+                ha_deviation_threshold=0.00035,
+                ha_score_threshold=100,
+                direction_window=300,
+                min_direction_change_pct=0.0008,
             )
         return cfg.with_updates(
             target_profit_usdt=2.0,
@@ -477,7 +505,9 @@ def _okx_strategy_config(signal_model: str, risk_profile: str, bar: str = "1m") 
             score_threshold=80,
             atr_period=60,
             min_expected_move_mult=0.45,
-            min_stop_atr_mult=1.05,
+            min_stop_atr_mult=1.25,
+            direction_window=300,
+            min_direction_change_pct=0.0008,
         )
     if risk_profile == "standard":
         return cfg
@@ -557,6 +587,8 @@ def _okx_strategy_config_payload(cfg: StrategyConfig) -> dict[str, Any]:
         "ha_deviation_window",
         "ha_deviation_threshold",
         "ha_score_threshold",
+        "direction_window",
+        "min_direction_change_pct",
     ]
     return {key: getattr(cfg, key) for key in keys}
 
@@ -573,6 +605,18 @@ def _effective_okx_bar(risk_profile: str, requested_bar: str) -> str:
     if risk_profile == "scalp-1s":
         return "1s"
     return requested_bar
+
+
+def _effective_trade_cooldown_seconds(risk_profile: str, requested: int | None) -> int:
+    if requested is not None:
+        return max(0, requested)
+    if risk_profile == "scalp-1s":
+        return 300
+    return 0
+
+
+def _accepted_order_count(stats: OKXSessionStats) -> int:
+    return sum(1 for order in stats.orders if order.accepted)
 
 
 def _signal_trade_key(signal: Signal) -> str:

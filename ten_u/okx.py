@@ -50,6 +50,7 @@ class OKXInstrument:
     base_ccy: str
     quote_ccy: str
     settle_ccy: str
+    inst_category: str
     tick_sz: Decimal
     lot_sz: Decimal
     min_sz: Decimal
@@ -67,6 +68,7 @@ class OKXInstrument:
             base_ccy=str(raw.get("baseCcy") or derived_base),
             quote_ccy=str(raw.get("quoteCcy") or derived_quote),
             settle_ccy=str(raw.get("settleCcy", "")),
+            inst_category=str(raw.get("instCategory", "")),
             tick_sz=_decimal_field(raw, "tickSz", "0"),
             lot_sz=_decimal_field(raw, "lotSz", "1"),
             min_sz=_decimal_field(raw, "minSz", "1"),
@@ -251,6 +253,8 @@ class OKXClient:
             if (
                 inst.quote_ccy == "USDT"
                 and inst.settle_ccy == "USDT"
+                and inst.inst_category == "1"
+                and not inst.inst_id.startswith("TEST")
                 and inst.state == "live"
                 and inst.tick_sz > 0
                 and inst.lot_sz > 0

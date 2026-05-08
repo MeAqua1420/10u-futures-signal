@@ -314,6 +314,9 @@ def evaluate_manuscript_signal(
         score = short_score
     if side is None or parts is None:
         return None
+    direction_change = _direction_change(candles, index, cfg.direction_window)
+    if not _direction_filter_ok(side, direction_change, cfg.min_direction_change_pct):
+        return None
 
     leverage = choose_leverage(close, float(current_atr), cfg)
     if leverage is None:
@@ -331,6 +334,8 @@ def evaluate_manuscript_signal(
             f"DEV={deviation:.5f}",
         ]
     )
+    if direction_change is not None:
+        reason_codes.append(f"DIRECTION_CHANGE={direction_change:.5f}")
     return Signal(
         time_utc=iso_utc(candle.close_time),
         time_cn=iso_cn(candle.close_time),
@@ -388,6 +393,25 @@ def _compressed_recently(
     if not values:
         return False
     return min(values) <= threshold
+
+
+def _direction_change(candles: list[Candle], index: int, window: int) -> float | None:
+    if window <= 0 or index < window:
+        return None
+    prior_close = candles[index - window].close
+    if prior_close <= 0:
+        return None
+    return candles[index].close / prior_close - 1
+
+
+def _direction_filter_ok(side: str, direction_change: float | None, threshold: float) -> bool:
+    if threshold <= 0 or direction_change is None:
+        return True
+    if side == "LONG":
+        return direction_change >= threshold
+    if side == "SHORT":
+        return direction_change <= -threshold
+    return False
 
 
 def choose_leverage(price: float, current_atr: float, cfg: StrategyConfig) -> int | None:

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from ten_u.cli import (
     _bar_to_seconds,
     _effective_okx_bar,
+    _effective_trade_cooldown_seconds,
     _okx_strategy_config,
     _poll_seconds,
     _prune_executed_signals,
@@ -108,8 +109,15 @@ class CLITests(unittest.TestCase):
         self.assertEqual(cfg.max_loss_usdt, 1.0)
         self.assertEqual(cfg.candle_interval_seconds, 1)
         self.assertEqual(cfg.max_leverage, 50)
-        self.assertEqual(cfg.ha_range_window, 180)
-        self.assertEqual(cfg.ha_deviation_window, 30)
+        self.assertEqual(cfg.ha_range_window, 300)
+        self.assertEqual(cfg.ha_deviation_window, 60)
+        self.assertEqual(cfg.direction_window, 300)
+        self.assertEqual(cfg.min_direction_change_pct, 0.0008)
+
+    def test_scalp_1s_default_trade_cooldown(self) -> None:
+        self.assertEqual(_effective_trade_cooldown_seconds("scalp-1s", None), 300)
+        self.assertEqual(_effective_trade_cooldown_seconds("scalp-1s", 0), 0)
+        self.assertEqual(_effective_trade_cooldown_seconds("balanced", None), 0)
 
     def test_bar_to_seconds(self) -> None:
         self.assertEqual(_bar_to_seconds("1s"), 1)

@@ -68,6 +68,7 @@ class OKXTests(unittest.TestCase):
                 "baseCcy": "BTC",
                 "quoteCcy": "USDT",
                 "settleCcy": "USDT",
+                "instCategory": "1",
                 "tickSz": "0.1",
                 "lotSz": "0.01",
                 "minSz": "0.01",

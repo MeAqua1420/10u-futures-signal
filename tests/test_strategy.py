@@ -4,7 +4,14 @@ import unittest
 
 from ten_u.config import CostConfig, StrategyConfig
 from ten_u.models import Candle, SymbolRules
-from ten_u.strategy import choose_leverage, double_heikin_ashi, exit_prices, manuscript_deviation, manuscript_range_features
+from ten_u.strategy import (
+    _direction_filter_ok,
+    choose_leverage,
+    double_heikin_ashi,
+    exit_prices,
+    manuscript_deviation,
+    manuscript_range_features,
+)
 from ten_u.backtest import calculate_trade_pnl, simulate_exit
 
 
@@ -96,6 +103,12 @@ class StrategyMathTests(unittest.TestCase):
         one_second = StrategyConfig(max_leverage=20, candle_interval_seconds=1)
         self.assertIsNone(choose_leverage(100.0, 0.03, one_minute))
         self.assertIsNotNone(choose_leverage(100.0, 0.03, one_second))
+
+    def test_direction_filter_matches_side(self) -> None:
+        self.assertTrue(_direction_filter_ok("LONG", 0.002, 0.001))
+        self.assertFalse(_direction_filter_ok("LONG", -0.002, 0.001))
+        self.assertTrue(_direction_filter_ok("SHORT", -0.002, 0.001))
+        self.assertFalse(_direction_filter_ok("SHORT", 0.002, 0.001))
 
     def test_symbol_rounding(self) -> None:
         rules = SymbolRules(
