@@ -280,9 +280,7 @@ class OKXClient:
             "/api/v5/market/candles",
             {"instId": inst_id, "bar": bar, "limit": str(limit)},
         )
-        candles = [okx_candle_from_row(row, bar) for row in payload.get("data", [])]
-        candles.sort(key=lambda c: c.open_time)
-        return candles
+        return closed_okx_candles(payload.get("data", []), bar)
 
     def set_leverage(self, inst_id: str, leverage: int, pos_side: str | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -296,6 +294,34 @@ class OKXClient:
 
     def place_order(self, order: OKXOrderPlan) -> dict[str, Any]:
         return self.private_post("/api/v5/trade/order", order.request_body())
+
+    def fills_history(
+        self,
+        inst_type: str = "SWAP",
+        inst_id: str | None = None,
+        begin: int | None = None,
+        end: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "instType": inst_type,
+            "limit": str(limit),
+        }
+        if inst_id is not None:
+            params["instId"] = inst_id
+        if begin is not None:
+            params["begin"] = str(begin)
+        if end is not None:
+            params["end"] = str(end)
+        payload = self.private_get("/api/v5/trade/fills-history", params)
+        return list(payload.get("data", []))
+
+    def positions(self, inst_type: str = "SWAP", inst_id: str | None = None) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"instType": inst_type}
+        if inst_id is not None:
+            params["instId"] = inst_id
+        payload = self.private_get("/api/v5/account/positions", params)
+        return list(payload.get("data", []))
 
 
 def okx_timestamp() -> str:
@@ -343,16 +369,35 @@ def okx_candle_from_row(row: list[Any], bar: str = "1m") -> Candle:
     )
 
 
+def closed_okx_candles(
+    rows: list[list[Any]],
+    bar: str = "1m",
+    now_ms: int | None = None,
+) -> list[Candle]:
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    candles = []
+    for row in rows:
+        candle = okx_candle_from_row(row, bar)
+        if _okx_row_is_closed(row, candle, now_ms):
+            candles.append(candle)
+    candles.sort(key=lambda c: c.open_time)
+    return candles
+
+
 def best_okx_signal(
     client: OKXClient,
     inst_ids: list[str],
     cfg: StrategyConfig,
     lookback: int = 720,
+    max_closed_candle_age_ms: int = 180_000,
 ) -> Signal | None:
     best: Signal | None = None
+    now_ms = int(time.time() * 1000)
     for inst_id in inst_ids:
         candles = client.candles(inst_id, "1m", lookback)
         if len(candles) < max(120, cfg.ha_range_window + cfg.ha_deviation_window + cfg.atr_period):
+            continue
+        if now_ms - candles[-1].close_time > max_closed_candle_age_ms:
             continue
         signal = StrategyEngine(inst_id, candles, cfg).evaluate(len(candles) - 1)
         if signal is None:
@@ -422,6 +467,12 @@ def _client_id(prefix: str) -> str:
     stamp = datetime.now(UTC).strftime("%y%m%d%H%M%S")
     suffix = str(int(time.time() * 1000))[-6:]
     return f"{prefix}{stamp}{suffix}"[:32]
+
+
+def _okx_row_is_closed(row: list[Any], candle: Candle, now_ms: int) -> bool:
+    if len(row) > 8 and row[8] not in ("", None):
+        return str(row[8]) == "1"
+    return candle.close_time < now_ms
 
 
 def _decimal_field(raw: dict[str, Any], key: str, default: str) -> Decimal:

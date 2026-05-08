@@ -4,7 +4,14 @@ import unittest
 
 from ten_u.config import StrategyConfig
 from ten_u.models import Signal
-from ten_u.okx import OKXCredentials, OKXInstrument, build_order_plan, okx_candle_from_row, okx_sign
+from ten_u.okx import (
+    OKXCredentials,
+    OKXInstrument,
+    build_order_plan,
+    closed_okx_candles,
+    okx_candle_from_row,
+    okx_sign,
+)
 
 
 class OKXTests(unittest.TestCase):
@@ -28,6 +35,24 @@ class OKXTests(unittest.TestCase):
         self.assertEqual(candle.open, 100.0)
         self.assertEqual(candle.quote_volume, 1234.0)
         self.assertEqual(candle.taker_buy_ratio, 0.5)
+
+    def test_closed_okx_candles_filters_unconfirmed_latest_bar(self) -> None:
+        rows = [
+            ["1778081220000", "100", "105", "99", "103", "12", "1.2", "1234", "1"],
+            ["1778081280000", "103", "106", "102", "104", "9", "0.9", "936", "0"],
+        ]
+        candles = closed_okx_candles(rows, "1m", now_ms=1778081330000)
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].open_time, 1778081220000)
+
+    def test_closed_okx_candles_uses_time_when_confirm_flag_missing(self) -> None:
+        rows = [
+            ["1778081220000", "100", "105", "99", "103", "12", "1.2", "1234"],
+            ["1778081280000", "103", "106", "102", "104", "9", "0.9", "936"],
+        ]
+        candles = closed_okx_candles(rows, "1m", now_ms=1778081281000)
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].open_time, 1778081220000)
 
     def test_contract_size_for_linear_swap(self) -> None:
         inst = OKXInstrument.from_api(

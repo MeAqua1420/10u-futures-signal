@@ -71,6 +71,14 @@ conda run -n 10U python -m ten_u.cli realtime --top 60 --mode ws --strategy manu
 
 OKX demo trading uses the same strategy engine, but reads OKX `SWAP` candles and submits orders to OKX V5 with the simulated-trading header. The execution command is safe by default: it prints a dry-run order plan unless `--execute` is provided.
 
+The OKX scanner uses only confirmed/closed `1m` candles. Its default `--risk-profile conservative` is stricter than the research default after the first demo run showed too much top-20 overtrading:
+
+- max leverage reduced from `15x` to `10x`
+- stronger Heikin-Ashi thresholds: `RangeY >= 50`, `PSY >= 0.40`, mean deviation `>= 0.0025`
+- tighter quality gates: expected move multiplier `1.30`, stop distance at least `1.60 ATR`
+
+Use `--risk-profile standard` only when you intentionally want the older, more aggressive behavior.
+
 Create an OKX demo API key in OKX and export credentials:
 
 ```bash
@@ -121,6 +129,8 @@ Keep scanning the OKX demo market until you stop it with `Ctrl-C`. In dry-run mo
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --pos-mode long-short --loop --poll-seconds 60
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --pos-mode long-short --loop --poll-seconds 60 --execute
 ```
+
+When you stop the loop with `Ctrl-C`, the program prints `SESSION_SUMMARY` with scan counts, accepted/rejected orders, closed-trade win rate, realized PnL from OKX fills, and current open-position unrealized PnL when API read permission is available. Realized PnL is based on OKX `fills-history`; avoid manual trades on the same instruments during one bot session if you want the session report to stay clean.
 
 The OKX order plan uses isolated margin, market entry, `10USDT` margin sizing, the strategy-selected leverage, and attached market TP/SL orders. The strategy still prints `expires_at`; automatic 4-hour time-exit management should be run by a separate monitor before relying on unattended demo trading.
 

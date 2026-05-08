@@ -4,7 +4,13 @@ import unittest
 
 from datetime import UTC, datetime, timedelta
 
-from ten_u.cli import _poll_seconds, _prune_executed_signals, _signal_trade_key, build_parser
+from ten_u.cli import (
+    _okx_strategy_config,
+    _poll_seconds,
+    _prune_executed_signals,
+    _signal_trade_key,
+    build_parser,
+)
 from ten_u.models import Signal
 
 
@@ -17,12 +23,15 @@ class CLITests(unittest.TestCase):
                 "5",
                 "--strategy",
                 "manuscript",
+                "--risk-profile",
+                "standard",
                 "--loop",
                 "--poll-seconds",
                 "30",
             ]
         )
         self.assertTrue(args.loop)
+        self.assertEqual(args.risk_profile, "standard")
         self.assertEqual(args.poll_seconds, 30)
 
     def test_okx_demo_loop_execute_flags_parse(self) -> None:
@@ -33,6 +42,8 @@ class CLITests(unittest.TestCase):
                 "5",
                 "--strategy",
                 "manuscript",
+                "--risk-profile",
+                "conservative",
                 "--pos-mode",
                 "long-short",
                 "--loop",
@@ -43,6 +54,7 @@ class CLITests(unittest.TestCase):
         )
         self.assertTrue(args.loop)
         self.assertTrue(args.execute)
+        self.assertEqual(args.risk_profile, "conservative")
         self.assertEqual(args.pos_mode, "long-short")
         self.assertEqual(args.poll_seconds, 45)
 
@@ -60,6 +72,14 @@ class CLITests(unittest.TestCase):
         }
         _prune_executed_signals(active)
         self.assertEqual(list(active.keys()), ["ETH-USDT-SWAP:LONG"])
+
+    def test_conservative_okx_strategy_is_stricter_than_standard(self) -> None:
+        standard = _okx_strategy_config("manuscript", "standard")
+        conservative = _okx_strategy_config("manuscript", "conservative")
+        self.assertLess(conservative.max_leverage, standard.max_leverage)
+        self.assertGreater(conservative.ha_range_y_threshold, standard.ha_range_y_threshold)
+        self.assertGreater(conservative.ha_deviation_threshold, standard.ha_deviation_threshold)
+        self.assertGreater(conservative.min_stop_atr_mult, standard.min_stop_atr_mult)
 
 
 def _sample_signal() -> Signal:

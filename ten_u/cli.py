@@ -22,6 +22,7 @@ from ten_u.config import BacktestConfig, CostConfig, StrategyConfig
 from ten_u.models import CN_TZ, Signal
 from ten_u.okx import OKXClient, OKXCredentials, best_okx_signal, build_order_plan
 from ten_u.realtime import rest_polling_scanner, websocket_scanner
+from ten_u.session_stats import OKXSessionStats
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     okx_signal.add_argument("--top", type=int, default=20)
     okx_signal.add_argument("--lookback", type=int, default=720)
     okx_signal.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
+    okx_signal.add_argument("--risk-profile", choices=["conservative", "standard"], default="conservative")
     okx_signal.add_argument("--loop", action="store_true", help="keep scanning until interrupted")
     okx_signal.add_argument("--poll-seconds", type=int, default=60, help="seconds between loop scans")
 
@@ -88,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     okx_demo.add_argument("--top", type=int, default=20)
     okx_demo.add_argument("--lookback", type=int, default=720)
     okx_demo.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
+    okx_demo.add_argument("--risk-profile", choices=["conservative", "standard"], default="conservative")
     okx_demo.add_argument("--pos-mode", choices=["net", "long-short"], default="net")
     okx_demo.add_argument("--execute", action="store_true", help="actually place the order in OKX demo trading")
     okx_demo.add_argument("--loop", action="store_true", help="keep scanning until interrupted")
@@ -211,13 +214,15 @@ def cmd_okx_symbols(args: argparse.Namespace) -> int:
 
 def cmd_okx_signal(args: argparse.Namespace) -> int:
     client = OKXClient(simulated=True)
-    cfg = StrategyConfig(signal_model=args.strategy)
+    cfg = _okx_strategy_config(args.strategy, args.risk_profile)
     inst_ids = args.symbols or client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
     if args.loop:
         _print_json(
             {
                 "mode": "WATCH_OKX_SIGNAL",
                 "message": "Scanning OKX simulated market data until interrupted.",
+                "risk_profile": args.risk_profile,
+                "strategy_config": _okx_strategy_config_payload(cfg),
                 "poll_seconds": _poll_seconds(args.poll_seconds),
                 "symbols": inst_ids,
                 **_scan_time(),
@@ -232,7 +237,7 @@ def cmd_okx_signal(args: argparse.Namespace) -> int:
 
 def cmd_okx_demo(args: argparse.Namespace) -> int:
     public_client = OKXClient(simulated=True)
-    cfg = StrategyConfig(signal_model=args.strategy)
+    cfg = _okx_strategy_config(args.strategy, args.risk_profile)
     inst_ids = args.symbols or public_client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
     if args.loop:
         _print_json(
@@ -242,6 +247,8 @@ def cmd_okx_demo(args: argparse.Namespace) -> int:
                 "execute": args.execute,
                 "simulated": True,
                 "pos_mode": args.pos_mode,
+                "risk_profile": args.risk_profile,
+                "strategy_config": _okx_strategy_config_payload(cfg),
                 "poll_seconds": _poll_seconds(args.poll_seconds),
                 "symbols": inst_ids,
                 **_scan_time(),
@@ -282,8 +289,11 @@ def _okx_demo_loop(
     args: argparse.Namespace,
 ) -> None:
     executed_signals: dict[str, datetime] = {}
+    stats = OKXSessionStats()
+    private_client = OKXClient(credentials=OKXCredentials.from_env(), simulated=True) if args.execute else None
     while True:
         try:
+            stats.record_scan()
             _prune_executed_signals(executed_signals)
             _okx_demo_once(
                 public_client,
@@ -292,16 +302,21 @@ def _okx_demo_loop(
                 args,
                 loop_mode=True,
                 executed_signals=executed_signals,
+                stats=stats,
+                private_client=private_client,
             )
         except KeyboardInterrupt:
             _print_json({"mode": "STOPPED", "message": "OKX demo scanner stopped by user.", **_scan_time()})
+            _print_json(stats.summary(private_client))
             return
         except Exception as exc:  # pragma: no cover - depends on network/API conditions
+            stats.record_error(exc)
             _print_json({"mode": "SCAN_ERROR", "error": str(exc), **_scan_time()})
         try:
             time.sleep(_poll_seconds(args.poll_seconds))
         except KeyboardInterrupt:
             _print_json({"mode": "STOPPED", "message": "OKX demo scanner stopped by user.", **_scan_time()})
+            _print_json(stats.summary(private_client))
             return
 
 
@@ -312,13 +327,19 @@ def _okx_demo_once(
     args: argparse.Namespace,
     loop_mode: bool = False,
     executed_signals: dict[str, datetime] | None = None,
+    stats: OKXSessionStats | None = None,
+    private_client: OKXClient | None = None,
 ) -> int | bool:
     signal = best_okx_signal(public_client, inst_ids, cfg, args.lookback)
     if signal is None:
+        if stats is not None:
+            stats.record_no_signal()
         _print_json(_okx_signal_payload(None, inst_ids))
         return False if loop_mode else 0
     signal_key = _signal_trade_key(signal)
     if args.execute and loop_mode and executed_signals is not None and signal_key in executed_signals:
+        if stats is not None:
+            stats.record_duplicate_signal()
         _print_json(
             {
                 "mode": "DUPLICATE_SIGNAL_SKIPPED",
@@ -337,6 +358,8 @@ def _okx_demo_once(
         return False if loop_mode else 2
     order_plan = build_order_plan(signal, instrument, args.pos_mode)
     if not args.execute:
+        if stats is not None:
+            stats.record_dry_run_signal()
         _print_json(
             {
                 "mode": "DRY_RUN",
@@ -347,13 +370,15 @@ def _okx_demo_once(
         )
         return False if loop_mode else 0
 
-    private_client = OKXClient(credentials=OKXCredentials.from_env(), simulated=True)
+    private_client = private_client or OKXClient(credentials=OKXCredentials.from_env(), simulated=True)
     private_client.set_leverage(
         order_plan.inst_id,
         order_plan.leverage,
         order_plan.pos_side,
     )
     response = private_client.place_order(order_plan)
+    if stats is not None:
+        stats.record_order(order_plan, response, signal_key)
     _print_json(
         {
             "mode": "EXECUTED_OKX_DEMO",
@@ -378,6 +403,49 @@ def _okx_signal_payload(signal: Signal | None, inst_ids: list[str]) -> dict[str,
 
 def _poll_seconds(value: int) -> int:
     return max(1, int(value))
+
+
+def _okx_strategy_config(signal_model: str, risk_profile: str) -> StrategyConfig:
+    cfg = StrategyConfig(signal_model=signal_model)
+    if risk_profile == "standard":
+        return cfg
+    if risk_profile != "conservative":
+        raise ValueError("risk_profile must be 'conservative' or 'standard'")
+    if signal_model == "manuscript":
+        return cfg.with_updates(
+            max_leverage=10,
+            min_expected_move_mult=1.30,
+            min_stop_atr_mult=1.60,
+            ha_range_y_threshold=50,
+            ha_psy_threshold=0.40,
+            ha_deviation_threshold=0.0025,
+            ha_score_threshold=100,
+        )
+    return cfg.with_updates(
+        max_leverage=10,
+        volume_multiple=2.2,
+        score_threshold=100,
+        min_expected_move_mult=1.30,
+        min_stop_atr_mult=1.60,
+    )
+
+
+def _okx_strategy_config_payload(cfg: StrategyConfig) -> dict[str, Any]:
+    keys = [
+        "signal_model",
+        "margin_usdt",
+        "target_profit_usdt",
+        "max_loss_usdt",
+        "min_leverage",
+        "max_leverage",
+        "min_expected_move_mult",
+        "min_stop_atr_mult",
+        "ha_range_y_threshold",
+        "ha_psy_threshold",
+        "ha_deviation_threshold",
+        "ha_score_threshold",
+    ]
+    return {key: getattr(cfg, key) for key in keys}
 
 
 def _signal_trade_key(signal: Signal) -> str:
