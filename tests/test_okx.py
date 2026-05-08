@@ -36,6 +36,13 @@ class OKXTests(unittest.TestCase):
         self.assertEqual(candle.quote_volume, 1234.0)
         self.assertEqual(candle.taker_buy_ratio, 0.5)
 
+    def test_okx_one_second_candle_conversion(self) -> None:
+        candle = okx_candle_from_row(
+            ["1778081220000", "100", "105", "99", "103", "12", "1.2", "1234", "1"],
+            "1s",
+        )
+        self.assertEqual(candle.close_time, 1778081220999)
+
     def test_closed_okx_candles_filters_unconfirmed_latest_bar(self) -> None:
         rows = [
             ["1778081220000", "100", "105", "99", "103", "12", "1.2", "1234", "1"],

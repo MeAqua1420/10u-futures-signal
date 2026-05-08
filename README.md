@@ -71,13 +71,14 @@ conda run -n 10U python -m ten_u.cli realtime --top 60 --mode ws --strategy manu
 
 OKX demo trading uses the same strategy engine, but reads OKX `SWAP` candles and submits orders to OKX V5 with the simulated-trading header. The execution command is safe by default: it prints a dry-run order plan unless `--execute` is provided.
 
-The OKX scanner uses only confirmed/closed `1m` candles. Its default `--risk-profile conservative` is stricter than the research default after the first demo run showed too much top-20 overtrading:
+The OKX scanner uses only confirmed/closed candles. The default is now `--risk-profile balanced` on `--bar 1m`, which relaxes the previous conservative cap while still avoiding unclosed bars:
 
-- max leverage reduced from `15x` to `10x`
-- stronger Heikin-Ashi thresholds: `RangeY >= 50`, `PSY >= 0.40`, mean deviation `>= 0.0025`
-- tighter quality gates: expected move multiplier `1.30`, stop distance at least `1.60 ATR`
+- `balanced`: max leverage `15x`, `RangeY >= 40`, `PSY >= 0.35`, mean deviation `>= 0.0020`
+- `conservative`: max leverage `10x`, `RangeY >= 50`, `PSY >= 0.40`, mean deviation `>= 0.0025`
+- `standard`: research defaults, max leverage `15x`
+- `aggressive`: max leverage `20x`, looser gates; use only for deliberate higher-frequency testing
 
-Use `--risk-profile standard` only when you intentionally want the older, more aggressive behavior.
+OKX currently accepts `--bar 1s` and `--bar 1m` here. `1s` can produce more opportunities, but it is much noisier and is not the original backtested timeframe.
 
 Create an OKX demo API key in OKX and export credentials:
 
@@ -128,6 +129,18 @@ Keep scanning the OKX demo market until you stop it with `Ctrl-C`. In dry-run mo
 ```bash
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --pos-mode long-short --loop --poll-seconds 60
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --pos-mode long-short --loop --poll-seconds 60 --execute
+```
+
+For more signals, run the balanced profile on confirmed `1s` candles:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --bar 1s --risk-profile balanced --pos-mode long-short --loop --poll-seconds 5 --execute
+```
+
+For the loosest current test profile:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --bar 1s --risk-profile aggressive --pos-mode long-short --loop --poll-seconds 5 --execute
 ```
 
 When you stop the loop with `Ctrl-C`, the program prints `SESSION_SUMMARY` with scan counts, accepted/rejected orders, closed-trade win rate, realized PnL from OKX fills, and current open-position unrealized PnL when API read permission is available. Realized PnL is based on OKX `fills-history`; avoid manual trades on the same instruments during one bot session if you want the session report to stay clean.

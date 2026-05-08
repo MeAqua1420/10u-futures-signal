@@ -91,6 +91,12 @@ class StrategyMathTests(unittest.TestCase):
         self.assertIsNone(choose_leverage(100.0, 6.0, cfg))
         self.assertIsNotNone(choose_leverage(100.0, 0.5, cfg))
 
+    def test_choose_leverage_scales_expected_move_for_one_second_bars(self) -> None:
+        one_minute = StrategyConfig(max_leverage=20, candle_interval_seconds=60)
+        one_second = StrategyConfig(max_leverage=20, candle_interval_seconds=1)
+        self.assertIsNone(choose_leverage(100.0, 0.03, one_minute))
+        self.assertIsNotNone(choose_leverage(100.0, 0.03, one_second))
+
     def test_symbol_rounding(self) -> None:
         rules = SymbolRules(
             symbol="TESTUSDT",

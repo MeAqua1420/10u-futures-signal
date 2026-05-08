@@ -19,6 +19,7 @@ class StrategyConfig:
     max_loss_usdt: float = 2.0
     legacy_max_loss_usdt: float = 10.0
     max_hold_minutes: int = 240
+    candle_interval_seconds: int = 60
     min_leverage: int = 3
     max_leverage: int = 15
     donchian_window: int = 30

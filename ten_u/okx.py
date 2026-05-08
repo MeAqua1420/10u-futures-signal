@@ -389,12 +389,13 @@ def best_okx_signal(
     inst_ids: list[str],
     cfg: StrategyConfig,
     lookback: int = 720,
+    bar: str = "1m",
     max_closed_candle_age_ms: int = 180_000,
 ) -> Signal | None:
     best: Signal | None = None
     now_ms = int(time.time() * 1000)
     for inst_id in inst_ids:
-        candles = client.candles(inst_id, "1m", lookback)
+        candles = client.candles(inst_id, bar, lookback)
         if len(candles) < max(120, cfg.ha_range_window + cfg.ha_deviation_window + cfg.atr_period):
             continue
         if now_ms - candles[-1].close_time > max_closed_candle_age_ms:
@@ -454,6 +455,8 @@ def _decimal_to_str(value: Decimal) -> str:
 
 
 def _bar_to_ms(bar: str) -> int:
+    if bar.endswith("s"):
+        return int(bar[:-1]) * 1_000
     if bar.endswith("m"):
         return int(bar[:-1]) * 60_000
     if bar.endswith("H"):

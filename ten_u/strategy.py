@@ -393,7 +393,9 @@ def _compressed_recently(
 def choose_leverage(price: float, current_atr: float, cfg: StrategyConfig) -> int | None:
     if price <= 0 or current_atr <= 0:
         return None
-    expected_move_pct = (current_atr * (cfg.max_hold_minutes**0.5)) / price
+    hold_seconds = max(1, cfg.max_hold_minutes * 60)
+    interval_seconds = max(1, cfg.candle_interval_seconds)
+    expected_move_pct = (current_atr * ((hold_seconds / interval_seconds) ** 0.5)) / price
     atr_pct = current_atr / price
     for leverage in range(cfg.min_leverage, cfg.max_leverage + 1):
         tp_pct = cfg.target_profit_usdt / (cfg.margin_usdt * leverage)

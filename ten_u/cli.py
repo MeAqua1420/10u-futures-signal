@@ -80,8 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     okx_signal.add_argument("--symbols", nargs="*", default=None, help="OKX instIds, e.g. BTC-USDT-SWAP ETH-USDT-SWAP")
     okx_signal.add_argument("--top", type=int, default=20)
     okx_signal.add_argument("--lookback", type=int, default=720)
+    okx_signal.add_argument("--bar", choices=["1s", "1m"], default="1m")
     okx_signal.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
-    okx_signal.add_argument("--risk-profile", choices=["conservative", "standard"], default="conservative")
+    okx_signal.add_argument("--risk-profile", choices=["balanced", "conservative", "standard", "aggressive"], default="balanced")
     okx_signal.add_argument("--loop", action="store_true", help="keep scanning until interrupted")
     okx_signal.add_argument("--poll-seconds", type=int, default=60, help="seconds between loop scans")
 
@@ -89,8 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     okx_demo.add_argument("--symbols", nargs="*", default=None, help="OKX instIds, e.g. BTC-USDT-SWAP ETH-USDT-SWAP")
     okx_demo.add_argument("--top", type=int, default=20)
     okx_demo.add_argument("--lookback", type=int, default=720)
+    okx_demo.add_argument("--bar", choices=["1s", "1m"], default="1m")
     okx_demo.add_argument("--strategy", choices=["manuscript", "breakout"], default="manuscript")
-    okx_demo.add_argument("--risk-profile", choices=["conservative", "standard"], default="conservative")
+    okx_demo.add_argument("--risk-profile", choices=["balanced", "conservative", "standard", "aggressive"], default="balanced")
     okx_demo.add_argument("--pos-mode", choices=["net", "long-short"], default="net")
     okx_demo.add_argument("--execute", action="store_true", help="actually place the order in OKX demo trading")
     okx_demo.add_argument("--loop", action="store_true", help="keep scanning until interrupted")
@@ -214,7 +216,7 @@ def cmd_okx_symbols(args: argparse.Namespace) -> int:
 
 def cmd_okx_signal(args: argparse.Namespace) -> int:
     client = OKXClient(simulated=True)
-    cfg = _okx_strategy_config(args.strategy, args.risk_profile)
+    cfg = _okx_strategy_config(args.strategy, args.risk_profile, args.bar)
     inst_ids = args.symbols or client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
     if args.loop:
         _print_json(
@@ -222,22 +224,23 @@ def cmd_okx_signal(args: argparse.Namespace) -> int:
                 "mode": "WATCH_OKX_SIGNAL",
                 "message": "Scanning OKX simulated market data until interrupted.",
                 "risk_profile": args.risk_profile,
+                "bar": args.bar,
                 "strategy_config": _okx_strategy_config_payload(cfg),
                 "poll_seconds": _poll_seconds(args.poll_seconds),
                 "symbols": inst_ids,
                 **_scan_time(),
             }
         )
-        _okx_signal_loop(client, inst_ids, cfg, args.lookback, args.poll_seconds)
+        _okx_signal_loop(client, inst_ids, cfg, args.lookback, args.poll_seconds, args.bar)
         return 0
-    signal = best_okx_signal(client, inst_ids, cfg, args.lookback)
+    signal = best_okx_signal(client, inst_ids, cfg, args.lookback, args.bar)
     _print_json(_okx_signal_payload(signal, inst_ids))
     return 0
 
 
 def cmd_okx_demo(args: argparse.Namespace) -> int:
     public_client = OKXClient(simulated=True)
-    cfg = _okx_strategy_config(args.strategy, args.risk_profile)
+    cfg = _okx_strategy_config(args.strategy, args.risk_profile, args.bar)
     inst_ids = args.symbols or public_client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
     if args.loop:
         _print_json(
@@ -248,6 +251,7 @@ def cmd_okx_demo(args: argparse.Namespace) -> int:
                 "simulated": True,
                 "pos_mode": args.pos_mode,
                 "risk_profile": args.risk_profile,
+                "bar": args.bar,
                 "strategy_config": _okx_strategy_config_payload(cfg),
                 "poll_seconds": _poll_seconds(args.poll_seconds),
                 "symbols": inst_ids,
@@ -265,10 +269,11 @@ def _okx_signal_loop(
     cfg: StrategyConfig,
     lookback: int,
     poll_seconds: int,
+    bar: str,
 ) -> None:
     while True:
         try:
-            signal = best_okx_signal(client, inst_ids, cfg, lookback)
+            signal = best_okx_signal(client, inst_ids, cfg, lookback, bar)
             _print_json(_okx_signal_payload(signal, inst_ids))
         except KeyboardInterrupt:
             _print_json({"mode": "STOPPED", "message": "OKX signal scanner stopped by user.", **_scan_time()})
@@ -330,7 +335,7 @@ def _okx_demo_once(
     stats: OKXSessionStats | None = None,
     private_client: OKXClient | None = None,
 ) -> int | bool:
-    signal = best_okx_signal(public_client, inst_ids, cfg, args.lookback)
+    signal = best_okx_signal(public_client, inst_ids, cfg, args.lookback, args.bar)
     if signal is None:
         if stats is not None:
             stats.record_no_signal()
@@ -405,12 +410,48 @@ def _poll_seconds(value: int) -> int:
     return max(1, int(value))
 
 
-def _okx_strategy_config(signal_model: str, risk_profile: str) -> StrategyConfig:
-    cfg = StrategyConfig(signal_model=signal_model)
+def _okx_strategy_config(signal_model: str, risk_profile: str, bar: str = "1m") -> StrategyConfig:
+    cfg = StrategyConfig(signal_model=signal_model, candle_interval_seconds=_bar_to_seconds(bar))
     if risk_profile == "standard":
         return cfg
+    if risk_profile == "balanced":
+        if signal_model == "manuscript":
+            return cfg.with_updates(
+                max_leverage=15,
+                min_expected_move_mult=1.15,
+                min_stop_atr_mult=1.35,
+                ha_range_y_threshold=40,
+                ha_psy_threshold=0.35,
+                ha_deviation_threshold=0.0020,
+                ha_score_threshold=100,
+            )
+        return cfg.with_updates(
+            max_leverage=15,
+            volume_multiple=2.0,
+            score_threshold=90,
+            min_expected_move_mult=1.15,
+            min_stop_atr_mult=1.35,
+        )
+    if risk_profile == "aggressive":
+        if signal_model == "manuscript":
+            return cfg.with_updates(
+                max_leverage=20,
+                min_expected_move_mult=1.05,
+                min_stop_atr_mult=1.10,
+                ha_range_y_threshold=30,
+                ha_psy_threshold=0.30,
+                ha_deviation_threshold=0.0015,
+                ha_score_threshold=90,
+            )
+        return cfg.with_updates(
+            max_leverage=20,
+            volume_multiple=1.8,
+            score_threshold=80,
+            min_expected_move_mult=1.05,
+            min_stop_atr_mult=1.10,
+        )
     if risk_profile != "conservative":
-        raise ValueError("risk_profile must be 'conservative' or 'standard'")
+        raise ValueError("risk_profile must be 'balanced', 'conservative', 'standard', or 'aggressive'")
     if signal_model == "manuscript":
         return cfg.with_updates(
             max_leverage=10,
@@ -436,6 +477,7 @@ def _okx_strategy_config_payload(cfg: StrategyConfig) -> dict[str, Any]:
         "margin_usdt",
         "target_profit_usdt",
         "max_loss_usdt",
+        "candle_interval_seconds",
         "min_leverage",
         "max_leverage",
         "min_expected_move_mult",
@@ -446,6 +488,14 @@ def _okx_strategy_config_payload(cfg: StrategyConfig) -> dict[str, Any]:
         "ha_score_threshold",
     ]
     return {key: getattr(cfg, key) for key in keys}
+
+
+def _bar_to_seconds(bar: str) -> int:
+    if bar.endswith("s"):
+        return int(bar[:-1])
+    if bar.endswith("m"):
+        return int(bar[:-1]) * 60
+    raise ValueError(f"unsupported OKX bar: {bar}")
 
 
 def _signal_trade_key(signal: Signal) -> str:

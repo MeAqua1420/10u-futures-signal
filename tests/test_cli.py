@@ -5,6 +5,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from ten_u.cli import (
+    _bar_to_seconds,
     _okx_strategy_config,
     _poll_seconds,
     _prune_executed_signals,
@@ -23,6 +24,8 @@ class CLITests(unittest.TestCase):
                 "5",
                 "--strategy",
                 "manuscript",
+                "--bar",
+                "1s",
                 "--risk-profile",
                 "standard",
                 "--loop",
@@ -31,6 +34,7 @@ class CLITests(unittest.TestCase):
             ]
         )
         self.assertTrue(args.loop)
+        self.assertEqual(args.bar, "1s")
         self.assertEqual(args.risk_profile, "standard")
         self.assertEqual(args.poll_seconds, 30)
 
@@ -42,8 +46,10 @@ class CLITests(unittest.TestCase):
                 "5",
                 "--strategy",
                 "manuscript",
+                "--bar",
+                "1s",
                 "--risk-profile",
-                "conservative",
+                "aggressive",
                 "--pos-mode",
                 "long-short",
                 "--loop",
@@ -54,7 +60,8 @@ class CLITests(unittest.TestCase):
         )
         self.assertTrue(args.loop)
         self.assertTrue(args.execute)
-        self.assertEqual(args.risk_profile, "conservative")
+        self.assertEqual(args.bar, "1s")
+        self.assertEqual(args.risk_profile, "aggressive")
         self.assertEqual(args.pos_mode, "long-short")
         self.assertEqual(args.poll_seconds, 45)
 
@@ -80,6 +87,21 @@ class CLITests(unittest.TestCase):
         self.assertGreater(conservative.ha_range_y_threshold, standard.ha_range_y_threshold)
         self.assertGreater(conservative.ha_deviation_threshold, standard.ha_deviation_threshold)
         self.assertGreater(conservative.min_stop_atr_mult, standard.min_stop_atr_mult)
+
+    def test_balanced_okx_strategy_relaxes_leverage_from_conservative(self) -> None:
+        balanced = _okx_strategy_config("manuscript", "balanced")
+        conservative = _okx_strategy_config("manuscript", "conservative")
+        self.assertGreater(balanced.max_leverage, conservative.max_leverage)
+        self.assertLess(balanced.ha_range_y_threshold, conservative.ha_range_y_threshold)
+
+    def test_aggressive_okx_strategy_uses_higher_max_leverage(self) -> None:
+        aggressive = _okx_strategy_config("manuscript", "aggressive", "1s")
+        self.assertEqual(aggressive.max_leverage, 20)
+        self.assertEqual(aggressive.candle_interval_seconds, 1)
+
+    def test_bar_to_seconds(self) -> None:
+        self.assertEqual(_bar_to_seconds("1s"), 1)
+        self.assertEqual(_bar_to_seconds("1m"), 60)
 
 
 def _sample_signal() -> Signal:
