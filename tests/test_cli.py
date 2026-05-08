@@ -66,7 +66,8 @@ class CLITests(unittest.TestCase):
         self.assertEqual(args.poll_seconds, 45)
 
     def test_poll_seconds_has_safe_minimum(self) -> None:
-        self.assertEqual(_poll_seconds(0), 1)
+        self.assertEqual(_poll_seconds(0), 0)
+        self.assertEqual(_poll_seconds(-1), 0)
 
     def test_signal_trade_key_deduplicates_symbol_side(self) -> None:
         signal = _sample_signal()

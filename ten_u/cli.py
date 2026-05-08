@@ -272,18 +272,16 @@ def _okx_signal_loop(
     bar: str,
 ) -> None:
     while True:
+        scan_started = time.monotonic()
         try:
             signal = best_okx_signal(client, inst_ids, cfg, lookback, bar)
-            _print_json(_okx_signal_payload(signal, inst_ids))
+            _print_json(_with_scan_duration(_okx_signal_payload(signal, inst_ids), scan_started))
         except KeyboardInterrupt:
             _print_json({"mode": "STOPPED", "message": "OKX signal scanner stopped by user.", **_scan_time()})
             return
         except Exception as exc:  # pragma: no cover - depends on network/API conditions
-            _print_json({"mode": "SCAN_ERROR", "error": str(exc), **_scan_time()})
-        try:
-            time.sleep(_poll_seconds(poll_seconds))
-        except KeyboardInterrupt:
-            _print_json({"mode": "STOPPED", "message": "OKX signal scanner stopped by user.", **_scan_time()})
+            _print_json(_with_scan_duration({"mode": "SCAN_ERROR", "error": str(exc), **_scan_time()}, scan_started))
+        if not _sleep_between_scans(poll_seconds, "OKX signal scanner"):
             return
 
 
@@ -297,6 +295,7 @@ def _okx_demo_loop(
     stats = OKXSessionStats()
     private_client = OKXClient(credentials=OKXCredentials.from_env(), simulated=True) if args.execute else None
     while True:
+        scan_started = time.monotonic()
         try:
             stats.record_scan()
             _prune_executed_signals(executed_signals)
@@ -309,6 +308,7 @@ def _okx_demo_loop(
                 executed_signals=executed_signals,
                 stats=stats,
                 private_client=private_client,
+                scan_started=scan_started,
             )
         except KeyboardInterrupt:
             _print_json({"mode": "STOPPED", "message": "OKX demo scanner stopped by user.", **_scan_time()})
@@ -316,12 +316,8 @@ def _okx_demo_loop(
             return
         except Exception as exc:  # pragma: no cover - depends on network/API conditions
             stats.record_error(exc)
-            _print_json({"mode": "SCAN_ERROR", "error": str(exc), **_scan_time()})
-        try:
-            time.sleep(_poll_seconds(args.poll_seconds))
-        except KeyboardInterrupt:
-            _print_json({"mode": "STOPPED", "message": "OKX demo scanner stopped by user.", **_scan_time()})
-            _print_json(stats.summary(private_client))
+            _print_json(_with_scan_duration({"mode": "SCAN_ERROR", "error": str(exc), **_scan_time()}, scan_started))
+        if not _sleep_between_scans(args.poll_seconds, "OKX demo scanner", stats, private_client):
             return
 
 
@@ -334,26 +330,29 @@ def _okx_demo_once(
     executed_signals: dict[str, datetime] | None = None,
     stats: OKXSessionStats | None = None,
     private_client: OKXClient | None = None,
+    scan_started: float | None = None,
 ) -> int | bool:
+    scan_started = time.monotonic() if scan_started is None else scan_started
     signal = best_okx_signal(public_client, inst_ids, cfg, args.lookback, args.bar)
     if signal is None:
         if stats is not None:
             stats.record_no_signal()
-        _print_json(_okx_signal_payload(None, inst_ids))
+        _print_json(_with_scan_duration(_okx_signal_payload(None, inst_ids), scan_started))
         return False if loop_mode else 0
     signal_key = _signal_trade_key(signal)
     if args.execute and loop_mode and executed_signals is not None and signal_key in executed_signals:
         if stats is not None:
             stats.record_duplicate_signal()
+        payload = {
+            "mode": "DUPLICATE_SIGNAL_SKIPPED",
+            "message": "This symbol/side already has an executed signal in the current expiry window.",
+            "signal_key": signal_key,
+            "active_until": executed_signals[signal_key].isoformat(),
+            "signal": signal.as_dict(),
+            **_scan_time(),
+        }
         _print_json(
-            {
-                "mode": "DUPLICATE_SIGNAL_SKIPPED",
-                "message": "This symbol/side already has an executed signal in the current expiry window.",
-                "signal_key": signal_key,
-                "active_until": executed_signals[signal_key].isoformat(),
-                "signal": signal.as_dict(),
-                **_scan_time(),
-            }
+            _with_scan_duration(payload, scan_started)
         )
         return False
     instruments = public_client.instruments()
@@ -365,14 +364,13 @@ def _okx_demo_once(
     if not args.execute:
         if stats is not None:
             stats.record_dry_run_signal()
-        _print_json(
-            {
-                "mode": "DRY_RUN",
-                "message": "No order was sent. Add --execute to place this in OKX demo trading.",
-                "order_plan": order_plan.as_dict(),
-                **_scan_time(),
-            }
-        )
+        payload = {
+            "mode": "DRY_RUN",
+            "message": "No order was sent. Add --execute to place this in OKX demo trading.",
+            "order_plan": order_plan.as_dict(),
+            **_scan_time(),
+        }
+        _print_json(_with_scan_duration(payload, scan_started))
         return False if loop_mode else 0
 
     private_client = private_client or OKXClient(credentials=OKXCredentials.from_env(), simulated=True)
@@ -384,17 +382,16 @@ def _okx_demo_once(
     response = private_client.place_order(order_plan)
     if stats is not None:
         stats.record_order(order_plan, response, signal_key)
-    _print_json(
-        {
-            "mode": "EXECUTED_OKX_DEMO",
-            "message": "One OKX demo order was sent. Loop mode will keep scanning and skip this symbol/side until expiry.",
-            "signal_key": signal_key,
-            "active_until": _signal_expires_at(signal).isoformat(),
-            "order_plan": order_plan.as_dict(),
-            "okx_response": response,
-            **_scan_time(),
-        }
-    )
+    payload = {
+        "mode": "EXECUTED_OKX_DEMO",
+        "message": "One OKX demo order was sent. Loop mode will keep scanning and skip this symbol/side until expiry.",
+        "signal_key": signal_key,
+        "active_until": _signal_expires_at(signal).isoformat(),
+        "order_plan": order_plan.as_dict(),
+        "okx_response": response,
+        **_scan_time(),
+    }
+    _print_json(_with_scan_duration(payload, scan_started))
     if loop_mode and executed_signals is not None:
         executed_signals[signal_key] = _signal_expires_at(signal)
     return False if loop_mode else 0
@@ -407,7 +404,31 @@ def _okx_signal_payload(signal: Signal | None, inst_ids: list[str]) -> dict[str,
 
 
 def _poll_seconds(value: int) -> int:
-    return max(1, int(value))
+    return max(0, int(value))
+
+
+def _sleep_between_scans(
+    poll_seconds: int,
+    stopped_message: str,
+    stats: OKXSessionStats | None = None,
+    private_client: OKXClient | None = None,
+) -> bool:
+    seconds = _poll_seconds(poll_seconds)
+    if seconds <= 0:
+        return True
+    try:
+        time.sleep(seconds)
+        return True
+    except KeyboardInterrupt:
+        _print_json({"mode": "STOPPED", "message": f"{stopped_message} stopped by user.", **_scan_time()})
+        if stats is not None:
+            _print_json(stats.summary(private_client))
+        return False
+
+
+def _with_scan_duration(payload: dict[str, Any], scan_started: float) -> dict[str, Any]:
+    payload["scan_duration_seconds"] = round(time.monotonic() - scan_started, 3)
+    return payload
 
 
 def _okx_strategy_config(signal_model: str, risk_profile: str, bar: str = "1m") -> StrategyConfig:

@@ -137,6 +137,12 @@ For more signals, run the balanced profile on confirmed `1s` candles:
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --bar 1s --risk-profile balanced --pos-mode long-short --loop --poll-seconds 5 --execute
 ```
 
+To measure the scanner's minimum loop latency, set `--poll-seconds 0`. This removes the fixed sleep; each printed scan includes `scan_duration_seconds`:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --bar 1s --risk-profile balanced --pos-mode long-short --loop --poll-seconds 0
+```
+
 For the loosest current test profile:
 
 ```bash
