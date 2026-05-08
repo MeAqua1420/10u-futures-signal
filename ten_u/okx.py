@@ -471,6 +471,22 @@ def okx_cache_path(inst_id: str, bar: str, start_time: int, end_time: int) -> Pa
     return OKX_CACHE_DIR / f"{safe_inst_id}_{bar}_{start_time}_{end_time}.csv"
 
 
+def cached_okx_candle_ranges(inst_id: str, bar: str) -> list[tuple[int, int, Path]]:
+    safe_inst_id = inst_id.replace("/", "_")
+    ranges: list[tuple[int, int, Path]] = []
+    for path in OKX_CACHE_DIR.glob(f"{safe_inst_id}_{bar}_*.csv"):
+        parts = path.stem.split("_")
+        if len(parts) < 4:
+            continue
+        try:
+            start_time = int(parts[-2])
+            end_time = int(parts[-1])
+        except ValueError:
+            continue
+        ranges.append((start_time, end_time, path))
+    return sorted(ranges)
+
+
 def read_cached_okx_candles(inst_id: str, bar: str, start_time: int, end_time: int) -> list[Candle]:
     path = okx_cache_path(inst_id, bar, start_time, end_time)
     if not path.exists():
@@ -498,13 +514,25 @@ def load_or_fetch_okx_candles(
     end_time: int,
     refresh: bool = False,
 ) -> list[Candle]:
+    candles, _ = load_or_fetch_okx_candles_with_source(client, inst_id, bar, start_time, end_time, refresh)
+    return candles
+
+
+def load_or_fetch_okx_candles_with_source(
+    client: OKXClient,
+    inst_id: str,
+    bar: str,
+    start_time: int,
+    end_time: int,
+    refresh: bool = False,
+) -> tuple[list[Candle], str]:
     if not refresh:
         cached = read_cached_okx_candles(inst_id, bar, start_time, end_time)
         if cached:
-            return cached
+            return cached, "CACHE_HIT"
     candles = client.fetch_candles_range(inst_id, bar, start_time, end_time)
     write_cached_okx_candles(inst_id, bar, start_time, end_time, candles)
-    return candles
+    return candles, "FETCH_MISS"
 
 
 def best_okx_signal(

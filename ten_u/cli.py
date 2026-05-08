@@ -26,7 +26,15 @@ from ten_u.market_calendar import (
     us_eastern_day_bounds_ms,
 )
 from ten_u.models import CN_TZ, Signal
-from ten_u.okx import OKXClient, OKXCredentials, best_okx_signal, build_order_plan, load_or_fetch_okx_candles
+from ten_u.okx import (
+    OKXClient,
+    OKXCredentials,
+    best_okx_signal,
+    build_order_plan,
+    cached_okx_candle_ranges,
+    load_or_fetch_okx_candles,
+    load_or_fetch_okx_candles_with_source,
+)
 from ten_u.realtime import rest_polling_scanner, websocket_scanner
 from ten_u.session_stats import OKXSessionStats
 
@@ -131,7 +139,12 @@ def build_parser() -> argparse.ArgumentParser:
     okx_weekend.add_argument("--symbols", nargs="*", default=None)
     okx_weekend.add_argument("--top", type=int, default=20)
     okx_weekend.add_argument("--weekends", type=int, default=8)
-    okx_weekend.add_argument("--non-workdays", type=int, default=None, help="exact number of recent US/Eastern non-workdays to fetch")
+    okx_weekend.add_argument(
+        "--non-workdays",
+        type=int,
+        default=None,
+        help="number of US/Eastern non-workdays; complete local cache is preferred before fetching recent missing days",
+    )
     okx_weekend.add_argument("--grid", choices=["quick", "full"], default="quick")
     okx_weekend.add_argument("--min-oos-trades", type=int, default=100)
     okx_weekend.add_argument("--min-quote-volume", type=float, default=50_000_000)
@@ -297,7 +310,7 @@ def cmd_okx_weekend_backtest(args: argparse.Namespace) -> int:
     )
     inst_ids = args.symbols or client.top_usdt_swap_instruments(args.top, cfg.min_liquidity_quote_volume)
     end = int(time.time() * 1000)
-    selected_dates = recent_us_market_non_workdays(args.non_workdays, end) if args.non_workdays else None
+    selected_dates = _select_nonworkday_dates(args, inst_ids, end) if args.non_workdays else None
     start = (
         min(us_eastern_day_bounds_ms(day)[0] for day in selected_dates)
         if selected_dates
@@ -305,7 +318,9 @@ def cmd_okx_weekend_backtest(args: argparse.Namespace) -> int:
     )
     instruments = client.instruments()
     candle_map = {}
-    print(f"Fetching OKX 1s US non-workday search data: {', '.join(inst_ids)}", file=sys.stderr)
+    print(f"Loading OKX 1s US non-workday search data: {', '.join(inst_ids)}", file=sys.stderr)
+    if selected_dates:
+        print(f"Selected US/Eastern non-workdays: {', '.join(day.isoformat() for day in selected_dates)}", file=sys.stderr)
     min_required = max(240, cfg.atr_compression_window + cfg.donchian_window + cfg.micro_momentum_slow)
     for inst_id in inst_ids:
         if inst_id not in instruments:
@@ -315,16 +330,16 @@ def cmd_okx_weekend_backtest(args: argparse.Namespace) -> int:
             candles = []
             for day in selected_dates:
                 day_start, day_end = us_eastern_day_bounds_ms(day)
-                candles.extend(
-                    load_or_fetch_okx_candles(
-                        client,
-                        inst_id,
-                        "1s",
-                        day_start,
-                        min(day_end, end),
-                        refresh=args.refresh,
-                    )
+                day_candles, source = load_or_fetch_okx_candles_with_source(
+                    client,
+                    inst_id,
+                    "1s",
+                    day_start,
+                    min(day_end, end),
+                    refresh=args.refresh,
                 )
+                print(f"{source}: {inst_id} {day.isoformat()} rows={len(day_candles)}", file=sys.stderr)
+                candles.extend(day_candles)
         else:
             candles = load_or_fetch_okx_candles(client, inst_id, "1s", start, end, refresh=args.refresh)
         if len(candles) < min_required:
@@ -677,6 +692,35 @@ def _market_day_filtered_payload(inst_ids: list[str]) -> dict[str, Any]:
         "non_workday_timezone": "America/New_York",
         **_scan_time(),
     }
+
+
+def _select_nonworkday_dates(args: argparse.Namespace, inst_ids: list[str], end_ms: int) -> list[date]:
+    requested = max(1, int(args.non_workdays))
+    if args.refresh:
+        return recent_us_market_non_workdays(requested, end_ms)
+    cached_dates = _common_cached_nonworkday_dates(inst_ids, "1s")
+    selected = list(cached_dates[-requested:])
+    if len(selected) >= requested:
+        return selected
+    for day in reversed(recent_us_market_non_workdays(requested, end_ms)):
+        if day not in selected:
+            selected.append(day)
+        if len(selected) >= requested:
+            break
+    return sorted(selected)
+
+
+def _common_cached_nonworkday_dates(inst_ids: list[str], bar: str) -> list[date]:
+    common: set[date] | None = None
+    for inst_id in inst_ids:
+        dates: set[date] = set()
+        for start_time, end_time, _ in cached_okx_candle_ranges(inst_id, bar):
+            day = us_eastern_date(start_time)
+            day_start, day_end = us_eastern_day_bounds_ms(day)
+            if start_time == day_start and end_time == day_end and is_us_market_non_workday(start_time):
+                dates.add(day)
+        common = dates if common is None else common & dates
+    return sorted(common or set())
 
 
 def _split_dates(dates: list[date]) -> tuple[set[date], set[date], set[date]]:
