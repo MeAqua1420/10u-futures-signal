@@ -3,10 +3,11 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from typing import Callable
 
 from ten_u.config import BacktestConfig, CostConfig, StrategyConfig, parameter_grid
 from ten_u.models import Candle, SymbolRules, TradeResult
-from ten_u.strategy import StrategyEngine, exit_prices
+from ten_u.strategy import StrategyEngine, exit_prices, strategy_hold_seconds
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,8 @@ class Metrics:
     expectancy: float
     profit_factor: float
     max_drawdown: float
+    max_consecutive_losses: int
+    average_bars_held: float
 
     @property
     def deployable(self) -> bool:
@@ -81,7 +84,11 @@ def simulate_exit(
     entry = candles[entry_index]
     entry_price = entry.open
     tp, stop = exit_prices(entry_price, side, leverage, cfg, max_loss_usdt)
-    max_exit_index = min(len(candles) - 1, entry_index + cfg.max_hold_minutes)
+    if cfg.max_hold_seconds > 0:
+        hold_bars = max(1, math.ceil(strategy_hold_seconds(cfg) / max(1, cfg.candle_interval_seconds)))
+        max_exit_index = min(len(candles) - 1, entry_index + hold_bars - 1)
+    else:
+        max_exit_index = min(len(candles) - 1, entry_index + cfg.max_hold_minutes)
     exit_index = max_exit_index
     exit_price = candles[max_exit_index].close
     outcome = "TIME_EXIT"
@@ -125,6 +132,7 @@ def backtest_symbol(
     variant: str = "main",
     start_index: int | None = None,
     end_index: int | None = None,
+    signal_filter: Callable[[Candle], bool] | None = None,
 ) -> list[TradeResult]:
     if len(candles) < 400:
         return []
@@ -133,6 +141,9 @@ def backtest_symbol(
     i = max(start_index if start_index is not None else 0, 1)
     end = min(end_index if end_index is not None else len(candles) - 1, len(candles) - 2)
     while i <= end:
+        if signal_filter is not None and not signal_filter(candles[i]):
+            i += 1
+            continue
         signal = engine.evaluate(i)
         if signal is None:
             i += 1
@@ -192,6 +203,7 @@ def backtest_portfolio(
     variant: str = "main",
     start_index: int | None = None,
     end_index: int | None = None,
+    signal_filter: Callable[[Candle], bool] | None = None,
 ) -> list[TradeResult]:
     all_trades: list[TradeResult] = []
     for symbol, candles in candle_map.items():
@@ -205,6 +217,7 @@ def backtest_portfolio(
                 variant,
                 start_index,
                 end_index,
+                signal_filter,
             )
         )
     all_trades.sort(key=lambda t: t.signal_time)
@@ -220,7 +233,7 @@ def backtest_portfolio(
 
 def summarize(trades: list[TradeResult]) -> Metrics:
     if not trades:
-        return Metrics(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, math.inf, 0.0)
+        return Metrics(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, math.inf, 0.0, 0, 0.0)
     wins = sum(1 for t in trades if t.net_pnl > 0)
     losses = len(trades) - wins
     gross_pnl = sum(t.gross_pnl for t in trades)
@@ -233,10 +246,17 @@ def summarize(trades: list[TradeResult]) -> Metrics:
     equity = 0.0
     peak = 0.0
     max_dd = 0.0
+    current_loss_streak = 0
+    max_loss_streak = 0
     for trade in trades:
         equity += trade.net_pnl
         peak = max(peak, equity)
         max_dd = max(max_dd, peak - equity)
+        if trade.net_pnl <= 0:
+            current_loss_streak += 1
+            max_loss_streak = max(max_loss_streak, current_loss_streak)
+        else:
+            current_loss_streak = 0
     return Metrics(
         trades=len(trades),
         wins=wins,
@@ -249,6 +269,8 @@ def summarize(trades: list[TradeResult]) -> Metrics:
         expectancy=net_pnl / len(trades),
         profit_factor=profit_factor,
         max_drawdown=max_dd,
+        max_consecutive_losses=max_loss_streak,
+        average_bars_held=sum(t.bars_held for t in trades) / len(trades),
     )
 
 

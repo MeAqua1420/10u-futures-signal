@@ -18,6 +18,7 @@ from ten_u.models import Candle, Signal, SymbolRules, iso_cn, iso_utc, ms_to_utc
 class FeatureSet:
     atr: list[float | None]
     atr_threshold: list[float | None]
+    atr_high_threshold: list[float | None]
     prior_high: list[float | None]
     prior_low: list[float | None]
     volume_median: list[float | None]
@@ -48,6 +49,7 @@ def prepare_features(candles: list[Candle], cfg: StrategyConfig) -> FeatureSet:
         return FeatureSet(
             atr=atr_values,
             atr_threshold=[None] * n,
+            atr_high_threshold=[None] * n,
             prior_high=[None] * n,
             prior_low=[None] * n,
             volume_median=[None] * n,
@@ -65,8 +67,37 @@ def prepare_features(candles: list[Candle], cfg: StrategyConfig) -> FeatureSet:
 
     highs = [c.high for c in candles]
     lows = [c.low for c in candles]
-    volumes = [c.volume for c in candles]
+    volumes = [c.quote_volume if cfg.signal_model == "microburst" else c.volume for c in candles]
     atr_values = atr(candles, cfg.atr_period)
+    if cfg.signal_model == "microburst":
+        atr_threshold = rolling_percentile_prior(
+            atr_values,
+            cfg.atr_compression_window,
+            cfg.atr_min_percentile,
+        )
+        atr_high_threshold = rolling_percentile_prior(
+            atr_values,
+            cfg.atr_compression_window,
+            cfg.atr_max_percentile,
+        )
+        return FeatureSet(
+            atr=atr_values,
+            atr_threshold=atr_threshold,
+            atr_high_threshold=atr_high_threshold,
+            prior_high=rolling_max_prior(highs, cfg.donchian_window),
+            prior_low=rolling_min_prior(lows, cfg.donchian_window),
+            volume_median=rolling_median_prior(volumes, cfg.volume_window),
+            ema_5_fast=[None] * n,
+            ema_5_slow=[None] * n,
+            ema_15_fast=[None] * n,
+            ema_15_slow=[None] * n,
+            ha_open=[0.0] * n,
+            ha_close=[0.0] * n,
+            ha_body=[0.0] * n,
+            ha_range_y=[None] * n,
+            ha_psy=[None] * n,
+            ha_deviation=[None] * n,
+        )
     atr_threshold = rolling_percentile_prior(
         atr_values,
         cfg.atr_compression_window,
@@ -87,6 +118,7 @@ def prepare_features(candles: list[Candle], cfg: StrategyConfig) -> FeatureSet:
     return FeatureSet(
         atr=atr_values,
         atr_threshold=atr_threshold,
+        atr_high_threshold=[None] * n,
         prior_high=rolling_max_prior(highs, cfg.donchian_window),
         prior_low=rolling_min_prior(lows, cfg.donchian_window),
         volume_median=rolling_median_prior(volumes, cfg.volume_window),
@@ -138,8 +170,10 @@ def evaluate_signal(
 ) -> Signal | None:
     if cfg.signal_model == "manuscript":
         return evaluate_manuscript_signal(symbol, candles, features, index, cfg, rules)
+    if cfg.signal_model == "microburst":
+        return evaluate_microburst_signal(symbol, candles, features, index, cfg, rules)
     if cfg.signal_model != "breakout":
-        raise ValueError("signal_model must be 'manuscript' or 'breakout'")
+        raise ValueError("signal_model must be 'manuscript', 'breakout', or 'microburst'")
     return evaluate_breakout_signal(symbol, candles, features, index, cfg, rules)
 
 
@@ -229,7 +263,7 @@ def evaluate_breakout_signal(
     if rules is not None:
         take_profit_price = rules.round_price(take_profit_price)
         stop_price = rules.round_price(stop_price)
-    expires_at_ms = candle.close_time + cfg.max_hold_minutes * 60_000
+    expires_at_ms = candle.close_time + hold_ms(cfg)
     return Signal(
         time_utc=iso_utc(candle.close_time),
         time_cn=iso_cn(candle.close_time),
@@ -325,7 +359,7 @@ def evaluate_manuscript_signal(
     if rules is not None:
         take_profit_price = rules.round_price(take_profit_price)
         stop_price = rules.round_price(stop_price)
-    expires_at_ms = candle.close_time + cfg.max_hold_minutes * 60_000
+    expires_at_ms = candle.close_time + hold_ms(cfg)
     reason_codes = [k for k, ok in parts.items() if ok]
     reason_codes.extend(
         [
@@ -352,6 +386,137 @@ def evaluate_manuscript_signal(
         score=score,
         reason_codes=tuple(reason_codes),
         strategy_variant="manuscript",
+    )
+
+
+def evaluate_microburst_signal(
+    symbol: str,
+    candles: list[Candle],
+    features: FeatureSet,
+    index: int,
+    cfg: StrategyConfig,
+    rules: SymbolRules | None = None,
+) -> Signal | None:
+    required_window = max(
+        cfg.donchian_window,
+        cfg.volume_window,
+        cfg.atr_compression_window,
+        cfg.micro_momentum_slow,
+        cfg.micro_volume_burst_seconds,
+    )
+    if index < required_window or index >= len(candles):
+        return None
+    candle = candles[index]
+    close = candle.close
+    if close <= 0:
+        return None
+    required = [
+        features.atr[index],
+        features.atr_threshold[index],
+        features.atr_high_threshold[index],
+        features.prior_high[index],
+        features.prior_low[index],
+        features.volume_median[index],
+    ]
+    if any(v is None for v in required):
+        return None
+
+    current_atr = float(features.atr[index] or 0.0)
+    atr_low = float(features.atr_threshold[index] or 0.0)
+    atr_high = float(features.atr_high_threshold[index] or 0.0)
+    prior_high = float(features.prior_high[index] or 0.0)
+    prior_low = float(features.prior_low[index] or 0.0)
+    volume_median = float(features.volume_median[index] or 0.0)
+    if current_atr <= 0 or atr_low <= 0 or atr_high <= 0 or volume_median <= 0:
+        return None
+
+    fast_change = _window_change(candles, index, cfg.micro_momentum_fast)
+    mid_change = _window_change(candles, index, cfg.micro_momentum_mid)
+    slow_change = _window_change(candles, index, cfg.micro_momentum_slow)
+    if fast_change is None or mid_change is None or slow_change is None:
+        return None
+    volume_sum = sum(c.quote_volume for c in candles[index - cfg.micro_volume_burst_seconds + 1 : index + 1])
+    volume_pulse = volume_sum >= volume_median * cfg.micro_volume_burst_seconds * cfg.volume_multiple
+    atr_in_range = atr_low <= current_atr <= atr_high
+    candle_range = max(candle.high - candle.low, 0.0)
+    if candle_range <= 0:
+        return None
+    body = abs(candle.close - candle.open)
+    body_ratio = body / candle_range
+    upper_wick = candle.high - max(candle.open, candle.close)
+    lower_wick = min(candle.open, candle.close) - candle.low
+    upper_wick_ratio = max(0.0, upper_wick) / candle_range
+    lower_wick_ratio = max(0.0, lower_wick) / candle_range
+
+    long_parts = {
+        "MOMENTUM_3_15_30_UP": fast_change > 0 and mid_change > 0 and slow_change > 0,
+        "MICRO_BREAKOUT_UP": close > prior_high,
+        "QUOTE_VOLUME_PULSE": volume_pulse,
+        "ATR_IN_RANGE": atr_in_range,
+        "CANDLE_QUALITY_UP": close > candle.open
+        and body_ratio >= cfg.micro_body_ratio_min
+        and upper_wick_ratio <= cfg.micro_wick_ratio_max,
+    }
+    short_parts = {
+        "MOMENTUM_3_15_30_DOWN": fast_change < 0 and mid_change < 0 and slow_change < 0,
+        "MICRO_BREAKOUT_DOWN": close < prior_low,
+        "QUOTE_VOLUME_PULSE": volume_pulse,
+        "ATR_IN_RANGE": atr_in_range,
+        "CANDLE_QUALITY_DOWN": close < candle.open
+        and body_ratio >= cfg.micro_body_ratio_min
+        and lower_wick_ratio <= cfg.micro_wick_ratio_max,
+    }
+    long_score = _microburst_score(long_parts)
+    short_score = _microburst_score(short_parts)
+    side = None
+    parts: dict[str, bool] | None = None
+    score = 0.0
+    if _microburst_required_ok(long_parts) and long_score >= cfg.score_threshold:
+        side = "LONG"
+        parts = long_parts
+        score = long_score
+    if _microburst_required_ok(short_parts) and short_score >= cfg.score_threshold and short_score > score:
+        side = "SHORT"
+        parts = short_parts
+        score = short_score
+    if side is None or parts is None:
+        return None
+
+    leverage = choose_leverage(close, current_atr, cfg)
+    if leverage is None:
+        return None
+    take_profit_price, stop_price = exit_prices(close, side, leverage, cfg, cfg.max_loss_usdt)
+    if rules is not None:
+        take_profit_price = rules.round_price(take_profit_price)
+        stop_price = rules.round_price(stop_price)
+    expires_at_ms = candle.close_time + hold_ms(cfg)
+    reason_codes = [k for k, ok in parts.items() if ok]
+    reason_codes.extend(
+        [
+            f"RET3={fast_change:.5f}",
+            f"RET15={mid_change:.5f}",
+            f"RET30={slow_change:.5f}",
+            f"VOL_PULSE={volume_sum / max(volume_median * cfg.micro_volume_burst_seconds, 1e-12):.2f}",
+            f"ATR={current_atr:.8f}",
+            f"BODY={body_ratio:.2f}",
+        ]
+    )
+    return Signal(
+        time_utc=iso_utc(candle.close_time),
+        time_cn=iso_cn(candle.close_time),
+        symbol=symbol,
+        side=side,
+        leverage=leverage,
+        margin_usdt=cfg.margin_usdt,
+        entry_reference=rules.round_price(close) if rules is not None else close,
+        take_profit_price=take_profit_price,
+        stop_price=stop_price,
+        target_pnl=cfg.target_profit_usdt,
+        max_loss=cfg.max_loss_usdt,
+        expires_at=ms_to_utc(expires_at_ms).isoformat(),
+        score=score,
+        reason_codes=tuple(reason_codes),
+        strategy_variant="microburst",
     )
 
 
@@ -382,6 +547,29 @@ def _manuscript_score(parts: dict[str, bool], trend_ok: bool, momentum_ok: bool)
     return min(score, 100.0)
 
 
+def _microburst_score(parts: dict[str, bool]) -> float:
+    weights = {
+        "MOMENTUM_3_15_30_UP": 30.0,
+        "MOMENTUM_3_15_30_DOWN": 30.0,
+        "MICRO_BREAKOUT_UP": 25.0,
+        "MICRO_BREAKOUT_DOWN": 25.0,
+        "QUOTE_VOLUME_PULSE": 25.0,
+        "ATR_IN_RANGE": 10.0,
+        "CANDLE_QUALITY_UP": 10.0,
+        "CANDLE_QUALITY_DOWN": 10.0,
+    }
+    return min(100.0, sum(weights[name] for name, ok in parts.items() if ok))
+
+
+def _microburst_required_ok(parts: dict[str, bool]) -> bool:
+    return (
+        (parts.get("MOMENTUM_3_15_30_UP") or parts.get("MOMENTUM_3_15_30_DOWN"))
+        and (parts.get("MICRO_BREAKOUT_UP") or parts.get("MICRO_BREAKOUT_DOWN"))
+        and bool(parts.get("QUOTE_VOLUME_PULSE"))
+        and bool(parts.get("ATR_IN_RANGE"))
+    )
+
+
 def _compressed_recently(
     atr_values: list[float | None],
     threshold: float,
@@ -404,6 +592,15 @@ def _direction_change(candles: list[Candle], index: int, window: int) -> float |
     return candles[index].close / prior_close - 1
 
 
+def _window_change(candles: list[Candle], index: int, window: int) -> float | None:
+    if window <= 0 or index < window:
+        return None
+    prior_close = candles[index - window].close
+    if prior_close <= 0:
+        return None
+    return candles[index].close / prior_close - 1
+
+
 def _direction_filter_ok(side: str, direction_change: float | None, threshold: float) -> bool:
     if threshold <= 0 or direction_change is None:
         return True
@@ -417,7 +614,7 @@ def _direction_filter_ok(side: str, direction_change: float | None, threshold: f
 def choose_leverage(price: float, current_atr: float, cfg: StrategyConfig) -> int | None:
     if price <= 0 or current_atr <= 0:
         return None
-    hold_seconds = max(1, cfg.max_hold_minutes * 60)
+    hold_seconds = max(1, strategy_hold_seconds(cfg))
     interval_seconds = max(1, cfg.candle_interval_seconds)
     expected_move_pct = (current_atr * ((hold_seconds / interval_seconds) ** 0.5)) / price
     atr_pct = current_atr / price
@@ -426,7 +623,9 @@ def choose_leverage(price: float, current_atr: float, cfg: StrategyConfig) -> in
         sl_pct = cfg.max_loss_usdt / (cfg.margin_usdt * leverage)
         target_reachable = expected_move_pct >= tp_pct * cfg.min_expected_move_mult
         stop_not_noise = sl_pct >= atr_pct * cfg.min_stop_atr_mult
-        if target_reachable and stop_not_noise:
+        target_net = cfg.target_profit_usdt - cfg.margin_usdt * leverage * cfg.estimated_round_trip_cost_rate
+        target_cost_ok = target_net >= cfg.min_target_net_usdt
+        if target_reachable and stop_not_noise and target_cost_ok:
             return leverage
     return None
 
@@ -445,6 +644,16 @@ def exit_prices(
     if side == "SHORT":
         return entry_price * (1 - tp_pct), entry_price * (1 + sl_pct)
     raise ValueError("side must be LONG or SHORT")
+
+
+def strategy_hold_seconds(cfg: StrategyConfig) -> int:
+    if cfg.max_hold_seconds > 0:
+        return cfg.max_hold_seconds
+    return max(1, cfg.max_hold_minutes * 60)
+
+
+def hold_ms(cfg: StrategyConfig) -> int:
+    return strategy_hold_seconds(cfg) * 1000
 
 
 def double_heikin_ashi(candles: list[Candle]) -> tuple[list[float], list[float]]:

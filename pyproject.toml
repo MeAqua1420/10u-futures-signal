@@ -7,7 +7,7 @@ name = "ten-u-futures-signal"
 version = "0.1.0"
 description = "10USDT Binance USD-M perpetual futures short-term signal research and terminal scanner."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pandas-market-calendars>=4.4"]
 authors = [{ name = "Codex" }]
 
 [project.optional-dependencies]

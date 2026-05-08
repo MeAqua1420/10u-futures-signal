@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
 import hmac
 import json
@@ -9,17 +10,20 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, ROUND_DOWN
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from ten_u.config import StrategyConfig
+from ten_u.market_calendar import is_us_market_non_workday
 from ten_u.models import Candle, Signal
 from ten_u.strategy import StrategyEngine
 
 
 OKX_BASE_URL = "https://www.okx.com"
+OKX_CACHE_DIR = Path("data/cache/okx")
 
 
 @dataclass(frozen=True)
@@ -288,6 +292,48 @@ class OKXClient:
         )
         return closed_okx_candles(payload.get("data", []), bar)
 
+    def history_candles(
+        self,
+        inst_id: str,
+        bar: str = "1m",
+        after: int | None = None,
+        before: int | None = None,
+        limit: int = 100,
+    ) -> list[Candle]:
+        params: dict[str, Any] = {
+            "instId": inst_id,
+            "bar": bar,
+            "limit": str(min(limit, 100)),
+        }
+        if after is not None:
+            params["after"] = str(after)
+        if before is not None:
+            params["before"] = str(before)
+        payload = self.public_get("/api/v5/market/history-candles", params)
+        return closed_okx_candles(payload.get("data", []), bar)
+
+    def fetch_candles_range(
+        self,
+        inst_id: str,
+        bar: str,
+        start_time: int,
+        end_time: int,
+        sleep_seconds: float = 0.05,
+    ) -> list[Candle]:
+        out: list[Candle] = []
+        cursor = end_time + _bar_to_ms(bar)
+        while cursor > start_time:
+            batch = self.history_candles(inst_id, bar, after=cursor, limit=100)
+            if not batch:
+                break
+            out.extend(c for c in batch if start_time <= c.open_time <= end_time)
+            oldest = min(c.open_time for c in batch)
+            if oldest <= start_time or oldest >= cursor:
+                break
+            cursor = oldest
+            time.sleep(sleep_seconds)
+        return dedupe_okx_candles(out)
+
     def set_leverage(self, inst_id: str, leverage: int, pos_side: str | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {
             "instId": inst_id,
@@ -300,6 +346,16 @@ class OKXClient:
 
     def place_order(self, order: OKXOrderPlan) -> dict[str, Any]:
         return self.private_post("/api/v5/trade/order", order.request_body())
+
+    def close_position(self, inst_id: str, pos_side: str | None = None, mgn_mode: str = "isolated") -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "instId": inst_id,
+            "mgnMode": mgn_mode,
+            "autoCxl": True,
+        }
+        if pos_side is not None:
+            body["posSide"] = pos_side
+        return self.private_post("/api/v5/trade/close-position", body)
 
     def fills_history(
         self,
@@ -390,6 +446,67 @@ def closed_okx_candles(
     return candles
 
 
+def dedupe_okx_candles(candles: list[Candle]) -> list[Candle]:
+    by_time = {c.open_time: c for c in candles}
+    return [by_time[t] for t in sorted(by_time)]
+
+
+OKX_CSV_FIELDS = [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "close_time",
+    "quote_volume",
+    "trades",
+    "taker_buy_base",
+    "taker_buy_quote",
+]
+
+
+def okx_cache_path(inst_id: str, bar: str, start_time: int, end_time: int) -> Path:
+    safe_inst_id = inst_id.replace("/", "_")
+    return OKX_CACHE_DIR / f"{safe_inst_id}_{bar}_{start_time}_{end_time}.csv"
+
+
+def read_cached_okx_candles(inst_id: str, bar: str, start_time: int, end_time: int) -> list[Candle]:
+    path = okx_cache_path(inst_id, bar, start_time, end_time)
+    if not path.exists():
+        return []
+    with path.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        return [Candle.from_csv_row(row) for row in reader]
+
+
+def write_cached_okx_candles(inst_id: str, bar: str, start_time: int, end_time: int, candles: list[Candle]) -> None:
+    path = okx_cache_path(inst_id, bar, start_time, end_time)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(OKX_CSV_FIELDS)
+        for candle in candles:
+            writer.writerow(candle.to_csv_row())
+
+
+def load_or_fetch_okx_candles(
+    client: OKXClient,
+    inst_id: str,
+    bar: str,
+    start_time: int,
+    end_time: int,
+    refresh: bool = False,
+) -> list[Candle]:
+    if not refresh:
+        cached = read_cached_okx_candles(inst_id, bar, start_time, end_time)
+        if cached:
+            return cached
+    candles = client.fetch_candles_range(inst_id, bar, start_time, end_time)
+    write_cached_okx_candles(inst_id, bar, start_time, end_time, candles)
+    return candles
+
+
 def best_okx_signal(
     client: OKXClient,
     inst_ids: list[str],
@@ -413,6 +530,8 @@ def best_okx_signal(
         if len(candles) < max(120, symbol_cfg.ha_range_window + symbol_cfg.ha_deviation_window + symbol_cfg.atr_period):
             continue
         if now_ms - candles[-1].close_time > max_closed_candle_age_ms:
+            continue
+        if symbol_cfg.us_nonworkday_only and not is_us_market_non_workday(candles[-1].close_time):
             continue
         signal = StrategyEngine(inst_id, candles, symbol_cfg).evaluate(len(candles) - 1)
         if signal is None:

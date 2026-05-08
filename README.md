@@ -78,6 +78,7 @@ The OKX scanner uses only confirmed/closed candles. The default is now `--risk-p
 - `standard`: research defaults, max leverage `15x`
 - `aggressive`: max leverage `20x`, looser gates; use only for deliberate higher-frequency testing
 - `scalp-1s`: forces confirmed `1s` candles, targets `+2U/-1U`, max leverage `50x` but clamps to the OKX instrument leverage limit; v2 adds 5-minute direction confirmation and a default 5-minute post-order cooldown
+- `weekend-1s`: experimental `microburst` profile for US/Eastern non-workdays, targets `+1U/-0.6U`, uses `30x-55x`, and exits after at most `180s`
 
 OKX currently accepts `--bar 1s` and `--bar 1m` here. `1s` can produce more opportunities, but it is much noisier and is not the original backtested timeframe.
 
@@ -158,6 +159,20 @@ For the dedicated `1s` scalping profile with `+2U/-1U`:
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --risk-profile scalp-1s --pos-mode long-short --loop --poll-seconds 0 --execute
 ```
 
+For the experimental US/Eastern non-workday hyper-scalp profile:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy microburst --risk-profile weekend-1s --pos-mode long-short --loop --poll-seconds 0 --execute
+```
+
+`weekend-1s` only emits or executes signals when the current US/Eastern date is a Saturday, Sunday, or NYSE full holiday. On regular NYSE workdays it prints `MARKET_DAY_FILTERED`. It uses `1s` closed candles, a `+1U/-0.6U` attached TP/SL, allows only one managed position at a time, and sends an OKX simulated `close-position` request when the 180-second max hold expires.
+
+Search OKX `1s` history for US/Eastern non-workday factor combinations:
+
+```bash
+conda run -n 10U ten-u okx-weekend-backtest --top 20 --weekends 8 --grid full --min-oos-trades 100
+```
+
 `scalp-1s` defaults to `--trade-cooldown-seconds 300` after every accepted order. You can override this, but setting it to `0` is only recommended for latency tests, not strategy evaluation:
 
 ```bash
@@ -172,7 +187,7 @@ conda run --no-capture-output -n 10U ten-u okx-demo --symbols BTC-USDT-SWAP ETH-
 
 When you stop the loop with `Ctrl-C`, the program prints `SESSION_SUMMARY` with scan counts, accepted/rejected orders, closed-trade win rate, realized PnL from OKX fills, and current open-position unrealized PnL when API read permission is available. Realized PnL is based on OKX `fills-history`; avoid manual trades on the same instruments during one bot session if you want the session report to stay clean.
 
-The OKX order plan uses isolated margin, market entry, `10USDT` margin sizing, the strategy-selected leverage, and attached market TP/SL orders. The strategy still prints `expires_at`; automatic 4-hour time-exit management should be run by a separate monitor before relying on unattended demo trading.
+The OKX order plan uses isolated margin, market entry, `10USDT` margin sizing, the strategy-selected leverage, and attached market TP/SL orders. The `weekend-1s` runtime also manages its own short time exit; other profiles still only print `expires_at`.
 
 ## Manuscript Strategy
 

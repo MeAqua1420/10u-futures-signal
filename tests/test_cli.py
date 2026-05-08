@@ -119,6 +119,48 @@ class CLITests(unittest.TestCase):
         self.assertEqual(_effective_trade_cooldown_seconds("scalp-1s", 0), 0)
         self.assertEqual(_effective_trade_cooldown_seconds("balanced", None), 0)
 
+    def test_weekend_1s_profile_forces_microburst_and_one_second_bar(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "okx-demo",
+                "--top",
+                "5",
+                "--strategy",
+                "microburst",
+                "--risk-profile",
+                "weekend-1s",
+            ]
+        )
+        self.assertEqual(args.strategy, "microburst")
+        self.assertEqual(_effective_okx_bar("weekend-1s", "1m"), "1s")
+        cfg = _okx_strategy_config("microburst", "weekend-1s", "1s")
+        self.assertEqual(cfg.target_profit_usdt, 1.0)
+        self.assertEqual(cfg.max_loss_usdt, 0.6)
+        self.assertEqual(cfg.max_hold_seconds, 180)
+        self.assertEqual(cfg.min_leverage, 30)
+        self.assertEqual(cfg.max_leverage, 55)
+        self.assertTrue(cfg.us_nonworkday_only)
+
+    def test_okx_weekend_backtest_flags_parse(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "okx-weekend-backtest",
+                "--top",
+                "3",
+                "--weekends",
+                "8",
+                "--grid",
+                "full",
+                "--min-oos-trades",
+                "25",
+            ]
+        )
+        self.assertEqual(args.command, "okx-weekend-backtest")
+        self.assertEqual(args.top, 3)
+        self.assertEqual(args.weekends, 8)
+        self.assertEqual(args.grid, "full")
+        self.assertEqual(args.min_oos_trades, 25)
+
     def test_bar_to_seconds(self) -> None:
         self.assertEqual(_bar_to_seconds("1s"), 1)
         self.assertEqual(_bar_to_seconds("1m"), 60)

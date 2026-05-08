@@ -19,6 +19,7 @@ class StrategyConfig:
     max_loss_usdt: float = 2.0
     legacy_max_loss_usdt: float = 10.0
     max_hold_minutes: int = 240
+    max_hold_seconds: int = 0
     candle_interval_seconds: int = 60
     min_leverage: int = 3
     max_leverage: int = 15
@@ -45,6 +46,17 @@ class StrategyConfig:
     ha_score_threshold: float = 100.0
     direction_window: int = 0
     min_direction_change_pct: float = 0.0
+    atr_min_percentile: float = 35.0
+    atr_max_percentile: float = 95.0
+    micro_momentum_fast: int = 3
+    micro_momentum_mid: int = 15
+    micro_momentum_slow: int = 30
+    micro_volume_burst_seconds: int = 3
+    micro_body_ratio_min: float = 0.55
+    micro_wick_ratio_max: float = 0.35
+    min_target_net_usdt: float = 0.05
+    estimated_round_trip_cost_rate: float = 0.0016
+    us_nonworkday_only: bool = False
 
     def with_updates(self, **kwargs: float | int | str) -> "StrategyConfig":
         return replace(self, **kwargs)
@@ -69,6 +81,42 @@ def parameter_grid(mode: str = "quick", signal_model: str = "breakout") -> Itera
     The quick grid is intentionally tiny for smoke tests. The full grid follows
     the plan exactly and can be expensive on 12 months x 60 symbols of 1m data.
     """
+    if signal_model == "microburst":
+        if mode == "quick":
+            yield {
+                "donchian_window": 20,
+                "volume_multiple": 2.0,
+                "atr_min_percentile": 35,
+                "atr_max_percentile": 95,
+                "score_threshold": 80,
+                "max_leverage": 50,
+                "max_hold_seconds": 180,
+            }
+            return
+        if mode != "full":
+            raise ValueError("grid mode must be 'quick' or 'full'")
+        keys = [
+            "donchian_window",
+            "volume_multiple",
+            "atr_min_percentile",
+            "atr_max_percentile",
+            "score_threshold",
+            "max_leverage",
+            "max_hold_seconds",
+        ]
+        values = [
+            [10, 20, 30],
+            [1.5, 2.0, 3.0],
+            [35, 50],
+            [85, 95],
+            [70, 80, 90],
+            [40, 50, 55],
+            [30, 60, 180],
+        ]
+        for combo in product(*values):
+            yield dict(zip(keys, combo, strict=True))
+        return
+
     if signal_model == "manuscript":
         if mode == "quick":
             yield {

@@ -8,9 +8,11 @@ from ten_u.strategy import (
     _direction_filter_ok,
     choose_leverage,
     double_heikin_ashi,
+    evaluate_signal,
     exit_prices,
     manuscript_deviation,
     manuscript_range_features,
+    prepare_features,
 )
 from ten_u.backtest import calculate_trade_pnl, simulate_exit
 
@@ -29,6 +31,23 @@ def candle(i: int, open_: float, high: float, low: float, close: float) -> Candl
         trades=100,
         taker_buy_base=50.0,
         taker_buy_quote=5_000.0,
+    )
+
+
+def second_candle(i: int, open_: float, high: float, low: float, close: float, quote_volume: float = 100.0) -> Candle:
+    start = i * 1_000
+    return Candle(
+        open_time=start,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=quote_volume / max(close, 1.0),
+        close_time=start + 999,
+        quote_volume=quote_volume,
+        trades=10,
+        taker_buy_base=0.0,
+        taker_buy_quote=quote_volume / 2,
     )
 
 
@@ -93,6 +112,22 @@ class StrategyMathTests(unittest.TestCase):
         self.assertAlmostEqual(net, -2.0)
         self.assertEqual(bars, 1)
 
+    def test_max_hold_seconds_forces_time_exit(self) -> None:
+        cfg = StrategyConfig(max_hold_seconds=3, candle_interval_seconds=1)
+        candles = [second_candle(i, 100, 100.1, 99.9, 100) for i in range(8)]
+        exit_index, exit_price, gross, net, outcome, bars = simulate_exit(
+            candles,
+            1,
+            "LONG",
+            10,
+            cfg,
+            CostConfig(taker_fee_rate=0, slippage_rate=0),
+            cfg.max_loss_usdt,
+        )
+        self.assertEqual(exit_index, 3)
+        self.assertEqual(outcome, "TIME_EXIT")
+        self.assertEqual(bars, 3)
+
     def test_choose_leverage_rejects_noisy_stop(self) -> None:
         cfg = StrategyConfig(max_leverage=20)
         self.assertIsNone(choose_leverage(100.0, 6.0, cfg))
@@ -103,6 +138,21 @@ class StrategyMathTests(unittest.TestCase):
         one_second = StrategyConfig(max_leverage=20, candle_interval_seconds=1)
         self.assertIsNone(choose_leverage(100.0, 0.03, one_minute))
         self.assertIsNotNone(choose_leverage(100.0, 0.03, one_second))
+
+    def test_choose_leverage_rejects_when_target_cost_is_too_high(self) -> None:
+        cfg = StrategyConfig(
+            target_profit_usdt=1,
+            max_loss_usdt=0.6,
+            min_leverage=60,
+            max_leverage=60,
+            max_hold_seconds=180,
+            candle_interval_seconds=1,
+            min_expected_move_mult=0.1,
+            min_stop_atr_mult=0.1,
+            estimated_round_trip_cost_rate=0.0016,
+            min_target_net_usdt=0.05,
+        )
+        self.assertIsNone(choose_leverage(100.0, 0.05, cfg))
 
     def test_direction_filter_matches_side(self) -> None:
         self.assertTrue(_direction_filter_ok("LONG", 0.002, 0.001))
@@ -144,6 +194,44 @@ class StrategyMathTests(unittest.TestCase):
         self.assertEqual(len(ha_close), 3)
         self.assertIsNone(dev[0])
         self.assertIsNotNone(dev[2])
+
+    def test_microburst_long_signal_scores_core_factors(self) -> None:
+        cfg = StrategyConfig(
+            signal_model="microburst",
+            target_profit_usdt=1,
+            max_loss_usdt=0.6,
+            max_hold_seconds=180,
+            candle_interval_seconds=1,
+            min_leverage=30,
+            max_leverage=55,
+            donchian_window=20,
+            volume_window=60,
+            volume_multiple=2.0,
+            score_threshold=80,
+            atr_period=14,
+            atr_compression_window=80,
+            atr_min_percentile=0,
+            atr_max_percentile=100,
+            min_expected_move_mult=0.1,
+            min_stop_atr_mult=0.1,
+        )
+        candles = []
+        price = 100.0
+        for i in range(140):
+            open_ = price
+            close = price + 0.03
+            quote_volume = 500.0 if i >= 137 else 100.0
+            candles.append(second_candle(i, open_, close + 0.01, open_ - 0.01, close, quote_volume))
+            price = close
+        features = prepare_features(candles, cfg)
+        signal = evaluate_signal("BTC-USDT-SWAP", candles, features, len(candles) - 1, cfg)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.side, "LONG")
+        self.assertEqual(signal.target_pnl, 1)
+        self.assertEqual(signal.max_loss, 0.6)
+        self.assertIn("MOMENTUM_3_15_30_UP", signal.reason_codes)
+        self.assertIn("MICRO_BREAKOUT_UP", signal.reason_codes)
 
 
 if __name__ == "__main__":
