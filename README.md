@@ -77,6 +77,7 @@ The OKX scanner uses only confirmed/closed candles. The default is now `--risk-p
 - `conservative`: max leverage `10x`, `RangeY >= 50`, `PSY >= 0.40`, mean deviation `>= 0.0025`
 - `standard`: research defaults, max leverage `15x`
 - `aggressive`: max leverage `20x`, looser gates; use only for deliberate higher-frequency testing
+- `scalp-1s`: forces confirmed `1s` candles, targets `+2U/-1U`, max leverage `50x` but clamps to the OKX instrument leverage limit
 
 OKX currently accepts `--bar 1s` and `--bar 1m` here. `1s` can produce more opportunities, but it is much noisier and is not the original backtested timeframe.
 
@@ -147,6 +148,18 @@ For the loosest current test profile:
 
 ```bash
 conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --bar 1s --risk-profile aggressive --pos-mode long-short --loop --poll-seconds 5 --execute
+```
+
+For the dedicated `1s` scalping profile with `+2U/-1U`:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-demo --top 20 --strategy manuscript --risk-profile scalp-1s --pos-mode long-short --loop --poll-seconds 0 --execute
+```
+
+BTC and ETH open fewer trades under the top-20 scanner because they usually have lower relative ATR and cleaner order books than high-beta alts, while the strategy requires both directional Heikin-Ashi structure and a reachable target/stop geometry. The scanner also emits only the best signal at each scan. To test majors directly, restrict the symbol set:
+
+```bash
+conda run --no-capture-output -n 10U ten-u okx-demo --symbols BTC-USDT-SWAP ETH-USDT-SWAP --strategy manuscript --risk-profile scalp-1s --pos-mode long-short --loop --poll-seconds 0 --execute
 ```
 
 When you stop the loop with `Ctrl-C`, the program prints `SESSION_SUMMARY` with scan counts, accepted/rejected orders, closed-trade win rate, realized PnL from OKX fills, and current open-position unrealized PnL when API read permission is available. Realized PnL is based on OKX `fills-history`; avoid manual trades on the same instruments during one bot session if you want the session report to stay clean.

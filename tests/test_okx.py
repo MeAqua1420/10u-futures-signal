@@ -74,8 +74,10 @@ class OKXTests(unittest.TestCase):
                 "ctVal": "0.01",
                 "ctValCcy": "BTC",
                 "state": "live",
+                "lever": "100",
             }
         )
+        self.assertEqual(inst.max_leverage, 100)
         self.assertEqual(inst.round_price(100.19), "100.1")
         self.assertEqual(inst.contracts_for_margin(100_000, 10, 10), "0.1")
 

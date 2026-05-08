@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from ten_u.cli import (
     _bar_to_seconds,
+    _effective_okx_bar,
     _okx_strategy_config,
     _poll_seconds,
     _prune_executed_signals,
@@ -99,6 +100,16 @@ class CLITests(unittest.TestCase):
         aggressive = _okx_strategy_config("manuscript", "aggressive", "1s")
         self.assertEqual(aggressive.max_leverage, 20)
         self.assertEqual(aggressive.candle_interval_seconds, 1)
+
+    def test_scalp_1s_profile_forces_one_second_bar_and_plus2_minus1(self) -> None:
+        cfg = _okx_strategy_config("manuscript", "scalp-1s", "1s")
+        self.assertEqual(_effective_okx_bar("scalp-1s", "1m"), "1s")
+        self.assertEqual(cfg.target_profit_usdt, 2.0)
+        self.assertEqual(cfg.max_loss_usdt, 1.0)
+        self.assertEqual(cfg.candle_interval_seconds, 1)
+        self.assertEqual(cfg.max_leverage, 50)
+        self.assertEqual(cfg.ha_range_window, 180)
+        self.assertEqual(cfg.ha_deviation_window, 30)
 
     def test_bar_to_seconds(self) -> None:
         self.assertEqual(_bar_to_seconds("1s"), 1)

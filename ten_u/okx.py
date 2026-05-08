@@ -56,6 +56,7 @@ class OKXInstrument:
     ct_val: Decimal
     ct_val_ccy: str
     state: str
+    max_leverage: int
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]) -> "OKXInstrument":
@@ -72,6 +73,7 @@ class OKXInstrument:
             ct_val=_decimal_field(raw, "ctVal", "1"),
             ct_val_ccy=str(raw.get("ctValCcy", "")),
             state=str(raw.get("state", "")),
+            max_leverage=int(float(raw.get("lever") or 0)),
         )
 
     def round_price(self, price: float) -> str:
@@ -391,16 +393,24 @@ def best_okx_signal(
     lookback: int = 720,
     bar: str = "1m",
     max_closed_candle_age_ms: int = 180_000,
+    instruments: dict[str, OKXInstrument] | None = None,
 ) -> Signal | None:
     best: Signal | None = None
     now_ms = int(time.time() * 1000)
     for inst_id in inst_ids:
+        symbol_cfg = cfg
+        instrument = instruments.get(inst_id) if instruments is not None else None
+        if instrument is not None and instrument.max_leverage > 0:
+            max_leverage = min(cfg.max_leverage, instrument.max_leverage)
+            if max_leverage < cfg.min_leverage:
+                continue
+            symbol_cfg = cfg.with_updates(max_leverage=max_leverage)
         candles = client.candles(inst_id, bar, lookback)
-        if len(candles) < max(120, cfg.ha_range_window + cfg.ha_deviation_window + cfg.atr_period):
+        if len(candles) < max(120, symbol_cfg.ha_range_window + symbol_cfg.ha_deviation_window + symbol_cfg.atr_period):
             continue
         if now_ms - candles[-1].close_time > max_closed_candle_age_ms:
             continue
-        signal = StrategyEngine(inst_id, candles, cfg).evaluate(len(candles) - 1)
+        signal = StrategyEngine(inst_id, candles, symbol_cfg).evaluate(len(candles) - 1)
         if signal is None:
             continue
         if best is None or signal.score > best.score:
